@@ -167,11 +167,17 @@ class RetryFailedPost extends Command
     }
 
     /**
+     * Keep in-flight checkpoints only. Confirmed remote failures must start over.
+     *
      * @param  array<string, mixed>|null  $context
      * @return array<string, mixed>|null
      */
     private function resumableContext(?array $context): ?array
     {
+        if (! in_array(data_get($context, 'category'), ['platform_unavailable', 'timeout'], true)) {
+            return null;
+        }
+
         $kept = [];
         $publishId = data_get($context, 'tiktok_publish_id');
         $workflow = data_get($context, 'instagram_workflow');

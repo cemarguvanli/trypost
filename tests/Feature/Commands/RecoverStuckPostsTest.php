@@ -175,6 +175,41 @@ test('it prunes TikTok photo derivatives when recovering a stuck retry', functio
     ]);
 });
 
+test('it preserves an Instagram workflow when recovering a stuck retry', function () {
+    $workflow = [
+        'stage' => 'final_container',
+        'container_id' => 'container-stuck',
+    ];
+    $post = Post::factory()->create([
+        'workspace_id' => $this->workspace->id,
+        'user_id' => $this->user->id,
+        'status' => PostStatus::Publishing,
+        'updated_at' => now()->subHours(2),
+    ]);
+    $account = SocialAccount::factory()->instagram()->create([
+        'workspace_id' => $this->workspace->id,
+    ]);
+    $platform = PostPlatform::factory()->instagram()->create([
+        'post_id' => $post->id,
+        'social_account_id' => $account->id,
+        'status' => PlatformStatus::Retrying,
+        'enabled' => true,
+        'error_context' => [
+            'instagram_workflow' => $workflow,
+            'retry_count' => 40,
+        ],
+        'updated_at' => now()->subHours(2),
+    ]);
+
+    $this->artisan('social:recover-stuck-posts')->assertSuccessful();
+
+    expect($platform->fresh()->status)->toBe(PlatformStatus::Failed)
+        ->and($platform->fresh()->error_context)->toMatchArray([
+            'instagram_workflow' => $workflow,
+            'category' => 'timeout',
+        ]);
+});
+
 test('it does not finalize a post while a platform is still actively retrying', function () {
     $post = Post::factory()->create([
         'workspace_id' => $this->workspace->id,

@@ -139,6 +139,24 @@ test('tiktok publisher resumes an existing publish without creating a duplicate'
     Http::assertNotSent(fn ($request) => str_contains($request->url(), '/init/'));
 });
 
+test('tiktok publisher retries a server-error status fetch without creating a duplicate', function () {
+    $this->postPlatform->update([
+        'error_context' => ['tiktok_publish_id' => 'pub_existing'],
+    ]);
+
+    Http::fake([
+        $this->api.'/post/publish/status/fetch/' => Http::response(['error' => ['code' => 'internal_error']], 503),
+    ]);
+
+    expect(fn () => $this->publisher->publish($this->postPlatform->fresh()))
+        ->toThrow(function (PlatformUnavailableException $exception): void {
+            expect($exception->httpStatus)->toBe(503)
+                ->and($exception->context['tiktok_publish_id'] ?? null)->toBe('pub_existing');
+        });
+
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), '/init/'));
+});
+
 test('tiktok publisher retries a rate-limited status fetch without creating a duplicate', function () {
     $this->postPlatform->update([
         'error_context' => ['tiktok_publish_id' => 'pub_existing'],
@@ -490,7 +508,7 @@ test('tiktok publisher publishes with user-selected privacy level even when crea
     });
 });
 
-test('tiktok publisher throws exception when publish fails', function () {
+test('tiktok publisher throws exception when publish fails', function (string $status) {
     $this->post->update([
         'media' => [
             [
@@ -509,7 +527,7 @@ test('tiktok publisher throws exception when publish fails', function () {
         ], 200),
         $this->api.'/post/publish/status/fetch/' => Http::response([
             'data' => [
-                'status' => 'FAILED',
+                'status' => $status,
                 'fail_reason' => 'video_rejected',
             ],
         ], 200),
@@ -517,7 +535,10 @@ test('tiktok publisher throws exception when publish fails', function () {
 
     expect(fn () => $this->publisher->publish($this->postPlatform))
         ->toThrow(TikTokPublishException::class);
-});
+})->with([
+    'FAILED' => ['FAILED'],
+    'PUBLISH_FAILED' => ['PUBLISH_FAILED'],
+]);
 
 test('tiktok publisher sends meta settings in video publish request', function () {
     $this->postPlatform->update([

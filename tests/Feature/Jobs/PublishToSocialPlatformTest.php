@@ -644,6 +644,41 @@ test('publish hard-fails when platform unavailable retries are exhausted', funct
     Bus::assertNotDispatched(PublishToSocialPlatform::class);
 });
 
+test('publish keeps a resumable checkpoint when platform unavailable retries are exhausted', function () {
+    Bus::fake([PublishToSocialPlatform::class]);
+    Event::fake();
+    Mail::fake();
+
+    $workflow = [
+        'stage' => 'final_container',
+        'container_id' => 'container-123',
+    ];
+    $this->postPlatform->update([
+        'error_context' => [
+            'tiktok_publish_id' => 'pub_in_flight',
+            'instagram_workflow' => $workflow,
+            'retry_count' => PublishToSocialPlatform::MAX_PLATFORM_UNAVAILABLE_RETRIES,
+        ],
+    ]);
+
+    $publisher = Mockery::mock(LinkedInPublisher::class);
+    $publisher->shouldReceive('publish')->andThrow(
+        new PlatformUnavailableException('LinkedIn 503', 503)
+    );
+    $this->app->instance(LinkedInPublisher::class, $publisher);
+
+    (new PublishToSocialPlatform($this->postPlatform->fresh()))->handle();
+
+    $context = $this->postPlatform->fresh()->error_context;
+
+    expect($this->postPlatform->fresh()->status)->toBe(PlatformStatus::Failed)
+        ->and($context['tiktok_publish_id'] ?? null)->toBe('pub_in_flight')
+        ->and($context['instagram_workflow'] ?? null)->toBe($workflow)
+        ->and($context['category'] ?? null)->toBe('platform_unavailable');
+
+    Bus::assertNotDispatched(PublishToSocialPlatform::class);
+});
+
 test('publish skips platforms that are already failed', function () {
     Event::fake();
     Mail::fake();
@@ -1227,6 +1262,41 @@ test('publish to social platform saves error context on social publish exception
     expect($this->postPlatform->error_context['platform_error_code'])->toBe('403');
     expect($this->postPlatform->error_context['content_length'])->toBe(11);
     expect($this->postPlatform->error_context['raw_response'])->toBe('{"error": "forbidden"}');
+});
+
+test('publish keeps a resumable checkpoint when a later publish exception is terminal', function () {
+    Event::fake();
+
+    $workflow = [
+        'stage' => 'final_container',
+        'container_id' => 'container-123',
+    ];
+    $this->postPlatform->update([
+        'error_context' => [
+            'tiktok_publish_id' => 'pub_dead',
+            'instagram_workflow' => $workflow,
+        ],
+    ]);
+
+    $publisher = Mockery::mock(LinkedInPublisher::class);
+    $publisher->shouldReceive('publish')->andThrow(
+        new LinkedInPublishException(
+            'Video rejected',
+            ErrorCategory::ContentPolicy,
+            'video_rejected',
+            '{"status":"FAILED"}',
+        )
+    );
+    $this->app->instance(LinkedInPublisher::class, $publisher);
+
+    (new PublishToSocialPlatform($this->postPlatform->fresh()))->handle();
+
+    $context = $this->postPlatform->fresh()->error_context;
+
+    expect($this->postPlatform->fresh()->status)->toBe(PlatformStatus::Failed)
+        ->and($context['tiktok_publish_id'] ?? null)->toBe('pub_dead')
+        ->and($context['instagram_workflow'] ?? null)->toBe($workflow)
+        ->and($context['category'] ?? null)->toBe('content_policy');
 });
 
 test('publish to social platform fails when scopes are missing', function () {

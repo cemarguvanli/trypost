@@ -1105,6 +1105,60 @@ test('bluesky publisher backs off while video processing remains pending', funct
     ]);
 });
 
+test('bluesky publisher caps video poll backoff at the configured maximum', function () {
+    attachBlueskyVideo($this->post);
+    config([
+        'trypost.platforms.bluesky.video_poll_seconds' => 10,
+        'trypost.platforms.bluesky.video_poll_max_seconds' => 30,
+    ]);
+    Sleep::fake();
+
+    $statusChecks = 0;
+    Http::fake(function ($request) use (&$statusChecks) {
+        $url = $request->url();
+
+        if (str_contains($url, 'plc.directory')) {
+            return Http::response(['service' => [['id' => '#atproto_pds', 'type' => 'AtprotoPersonalDataServer', 'serviceEndpoint' => 'https://pds.example.host']]]);
+        }
+        if (str_contains($url, 'getServiceAuth')) {
+            return Http::response(['token' => 'service-auth-token']);
+        }
+        if (str_contains($url, 'app.bsky.video.uploadVideo')) {
+            return Http::response(['jobId' => 'job-cap', 'state' => 'JOB_STATE_CREATED']);
+        }
+        if (str_contains($url, 'app.bsky.video.getJobStatus')) {
+            $statusChecks++;
+
+            if ($statusChecks === 8) {
+                return Http::response(['jobStatus' => [
+                    'jobId' => 'job-cap',
+                    'state' => 'JOB_STATE_COMPLETED',
+                    'blob' => ['$type' => 'blob', 'ref' => ['$link' => 'bafcap'], 'mimeType' => 'video/mp4', 'size' => 2048],
+                ]]);
+            }
+
+            return Http::response(['jobStatus' => ['jobId' => 'job-cap', 'state' => 'JOB_STATE_RUNNING']]);
+        }
+        if (str_contains($url, 'createRecord')) {
+            return Http::response(['uri' => 'at://did:plc:testuser123/app.bsky.feed.post/3cap', 'cid' => 'bafcap']);
+        }
+
+        return Http::response(str_repeat('v', 2048));
+    });
+
+    $this->publisher->publish($this->postPlatform);
+
+    Sleep::assertSequence([
+        Sleep::for(10)->seconds(),
+        Sleep::for(10)->seconds(),
+        Sleep::for(10)->seconds(),
+        Sleep::for(20)->seconds(),
+        Sleep::for(20)->seconds(),
+        Sleep::for(20)->seconds(),
+        Sleep::for(30)->seconds(),
+    ]);
+});
+
 test('bluesky publisher retries the upload up to three times before giving up', function () {
     attachBlueskyVideo($this->post);
     config(['trypost.platforms.bluesky.video_poll_seconds' => 0]);

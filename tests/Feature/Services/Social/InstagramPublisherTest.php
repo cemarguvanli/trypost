@@ -826,6 +826,57 @@ test('instagram publisher rejects an invalid workflow instead of starting over',
     'carousel without children' => [['stage' => 'carousel_children', 'child_container_ids' => []]],
 ]);
 
+test('instagram publisher fails a resumed container that reports ERROR', function () {
+    $this->postPlatform->update([
+        'error_context' => [
+            'instagram_workflow' => [
+                'stage' => 'final_container',
+                'container_id' => 'container-123',
+            ],
+        ],
+    ]);
+
+    Http::fake([
+        'https://graph.instagram.com/v25.0/container-123*' => Http::response(['status_code' => 'ERROR'], 200),
+    ]);
+
+    expect(fn () => $this->publisher->publish($this->postPlatform->fresh()))
+        ->toThrow(InstagramPublishException::class, 'Instagram media processing failed');
+
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), '/media_publish'));
+    Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_contains($request->url(), '/media'));
+});
+
+test('instagram publisher retries a 5xx on container status without publishing', function () {
+    $this->post->update([
+        'media' => [[
+            'id' => 'test-media-id',
+            'path' => 'media/2026-01/test-image.jpg',
+            'url' => 'https://example.com/media/2026-01/test-image.jpg',
+            'mime_type' => 'image/jpeg',
+            'original_filename' => 'test.jpg',
+        ]],
+    ]);
+
+    Http::fake([
+        'https://graph.instagram.com/v25.0/ig_123456789/media' => Http::response(['id' => 'container-123']),
+        'https://graph.instagram.com/v25.0/container-123*' => Http::response(['error' => ['message' => 'Service temporarily unavailable']], 503),
+    ]);
+
+    expect(fn () => $this->publisher->publish($this->postPlatform))
+        ->toThrow(function (PlatformUnavailableException $exception): void {
+            expect($exception->httpStatus)->toBe(503)
+                ->and($exception->context)->toBe([
+                    'instagram_workflow' => [
+                        'stage' => 'final_container',
+                        'container_id' => 'container-123',
+                    ],
+                ]);
+        });
+
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), '/media_publish'));
+});
+
 test('instagram publisher retries a 429 on container status without publishing', function () {
     $this->post->update([
         'media' => [[

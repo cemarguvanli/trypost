@@ -287,6 +287,7 @@ test('a TikTok retry with a publish_id resumes instead of calling init', functio
             'tiktok_publish_id' => 'pub_existing',
             'retry_count' => 120,
             'max_retries' => 120,
+            'category' => 'platform_unavailable',
         ],
     ]);
 
@@ -341,6 +342,7 @@ test('an Instagram retry with a workflow resumes instead of creating a container
             ],
             'retry_count' => 90,
             'max_retries' => 90,
+            'category' => 'platform_unavailable',
         ],
     ]);
 
@@ -365,4 +367,242 @@ test('an Instagram retry with a workflow resumes instead of creating a container
         ->and($failedInstagram->fresh()->platform_post_id)->toBe('media-123456789');
 
     Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/ig_123456789/media'));
+});
+
+test('it treats an empty TikTok publish_id as a new attempt', function () {
+    Bus::fake([PublishToSocialPlatform::class]);
+    Storage::fake();
+
+    $derivativePath = 'social-tiktok-photos/123e4567-e89b-12d3-a456-426614174000.jpg';
+    Storage::put($derivativePath, 'temporary image');
+    $failedTikTok = PostPlatform::factory()->tiktok()->failed()->create([
+        'post_id' => $this->post->id,
+        'social_account_id' => SocialAccount::factory()->tiktok()->create([
+            'workspace_id' => $this->workspace->id,
+        ]),
+        'error_context' => [
+            'tiktok_publish_id' => '',
+            'tiktok_derivative_paths' => [$derivativePath],
+            'category' => 'unknown',
+        ],
+    ]);
+
+    $this->artisan('posts:retry', ['post' => $this->post->id])
+        ->expectsConfirmation('Queue publish attempts for these failed platforms?', 'yes')
+        ->expectsOutputToContain('New')
+        ->assertSuccessful();
+
+    Storage::assertMissing($derivativePath);
+    expect($failedTikTok->fresh()->status)->toBe(PlatformStatus::Pending)
+        ->and($failedTikTok->fresh()->error_context)->toBeNull();
+});
+
+test('it treats an empty Instagram workflow as a new attempt', function () {
+    Bus::fake([PublishToSocialPlatform::class]);
+
+    $failedInstagram = PostPlatform::factory()->instagram()->failed()->create([
+        'post_id' => $this->post->id,
+        'social_account_id' => SocialAccount::factory()->instagram()->create([
+            'workspace_id' => $this->workspace->id,
+        ]),
+        'error_context' => [
+            'instagram_workflow' => [],
+            'category' => 'unknown',
+        ],
+    ]);
+
+    $this->artisan('posts:retry', ['post' => $this->post->id])
+        ->expectsConfirmation('Queue publish attempts for these failed platforms?', 'yes')
+        ->expectsOutputToContain('New')
+        ->assertSuccessful();
+
+    expect($failedInstagram->fresh()->status)->toBe(PlatformStatus::Pending)
+        ->and($failedInstagram->fresh()->error_context)->toBeNull();
+});
+
+test('it keeps TikTok and Instagram checkpoints independently on the same post', function () {
+    Bus::fake([PublishToSocialPlatform::class]);
+
+    $workflow = [
+        'stage' => 'final_container',
+        'container_id' => 'container-123',
+    ];
+    $failedTikTok = PostPlatform::factory()->tiktok()->failed()->create([
+        'post_id' => $this->post->id,
+        'social_account_id' => SocialAccount::factory()->tiktok()->create([
+            'workspace_id' => $this->workspace->id,
+        ]),
+        'error_context' => [
+            'tiktok_publish_id' => 'pub_existing',
+            'retry_count' => 12,
+            'category' => 'platform_unavailable',
+        ],
+    ]);
+    $failedInstagram = PostPlatform::factory()->instagram()->failed()->create([
+        'post_id' => $this->post->id,
+        'social_account_id' => SocialAccount::factory()->instagram()->create([
+            'workspace_id' => $this->workspace->id,
+        ]),
+        'error_context' => [
+            'instagram_workflow' => $workflow,
+            'retry_count' => 8,
+            'category' => 'timeout',
+        ],
+    ]);
+
+    $this->artisan('posts:retry', ['post' => $this->post->id])
+        ->expectsConfirmation('Queue publish attempts for these failed platforms?', 'yes')
+        ->expectsOutputToContain('Resume')
+        ->assertSuccessful();
+
+    expect($failedTikTok->fresh()->error_context)->toBe([
+        'tiktok_publish_id' => 'pub_existing',
+    ])->and($failedInstagram->fresh()->error_context)->toBe([
+        'instagram_workflow' => $workflow,
+    ]);
+});
+
+test('it starts over when the failure category is not resumable', function (?string $category) {
+    Bus::fake([PublishToSocialPlatform::class]);
+
+    $errorContext = ['tiktok_publish_id' => 'pub_dead'];
+
+    if ($category !== null) {
+        $errorContext['category'] = $category;
+    }
+
+    $failedTikTok = PostPlatform::factory()->tiktok()->failed()->create([
+        'post_id' => $this->post->id,
+        'social_account_id' => SocialAccount::factory()->tiktok()->create([
+            'workspace_id' => $this->workspace->id,
+        ]),
+        'error_context' => $errorContext,
+    ]);
+
+    $this->artisan('posts:retry', ['post' => $this->post->id])
+        ->expectsConfirmation('Queue publish attempts for these failed platforms?', 'yes')
+        ->expectsOutputToContain('New')
+        ->assertSuccessful();
+
+    expect($failedTikTok->fresh()->status)->toBe(PlatformStatus::Pending)
+        ->and($failedTikTok->fresh()->error_context)->toBeNull();
+})->with([
+    'media format' => ['media_format'],
+    'content policy' => ['content_policy'],
+    'server error' => ['server_error'],
+    'permission' => ['permission'],
+    'rate limit' => ['rate_limit'],
+    'unknown' => ['unknown'],
+    'missing category' => [null],
+]);
+
+test('a TikTok retry after a remote FAILED starts a new publish', function () {
+    $this->post->update([
+        'media' => [[
+            'id' => 'test-media-video',
+            'path' => 'media/2026-01/test-video.mp4',
+            'url' => 'https://example.com/media/2026-01/test-video.mp4',
+            'mime_type' => 'video/mp4',
+            'original_filename' => 'test-video.mp4',
+        ]],
+    ]);
+
+    $failedTikTok = PostPlatform::factory()->tiktok()->failed()->create([
+        'post_id' => $this->post->id,
+        'social_account_id' => SocialAccount::factory()->tiktok()->create([
+            'workspace_id' => $this->workspace->id,
+            'username' => 'tiktoker',
+            'token_expires_at' => now()->addDay(),
+        ]),
+        'error_context' => [
+            'tiktok_publish_id' => 'pub_dead',
+            'category' => 'media_format',
+        ],
+    ]);
+
+    Mail::fake();
+    Queue::fake();
+
+    $this->artisan('posts:retry', ['post' => $this->post->id])
+        ->expectsConfirmation('Queue publish attempts for these failed platforms?', 'yes')
+        ->expectsOutputToContain('New')
+        ->assertSuccessful();
+
+    expect($failedTikTok->fresh()->error_context)->toBeNull();
+
+    $api = config('trypost.platforms.tiktok.api');
+    Http::fake([
+        $api.'/post/publish/video/init/' => Http::response([
+            'data' => ['publish_id' => 'pub_fresh'],
+        ], 200),
+        $api.'/post/publish/status/fetch/' => Http::response([
+            'data' => [
+                'status' => 'PUBLISH_COMPLETE',
+                'publicaly_available_post_id' => ['video_456'],
+            ],
+        ]),
+    ]);
+
+    (new PublishToSocialPlatform($failedTikTok->fresh()))->handle();
+
+    expect($failedTikTok->fresh()->status)->toBe(PlatformStatus::Published)
+        ->and($failedTikTok->fresh()->platform_post_id)->toBe('video_456');
+
+    Http::assertSent(fn ($request) => str_contains($request->url(), '/init/'));
+});
+
+test('an Instagram retry after a container ERROR starts a new container', function () {
+    $this->post->update([
+        'media' => [[
+            'id' => 'test-media-id',
+            'path' => 'media/2026-01/test-image.jpg',
+            'url' => 'https://example.com/media/2026-01/test-image.jpg',
+            'mime_type' => 'image/jpeg',
+            'original_filename' => 'test.jpg',
+        ]],
+    ]);
+
+    $failedInstagram = PostPlatform::factory()->instagram()->failed()->create([
+        'post_id' => $this->post->id,
+        'social_account_id' => SocialAccount::factory()->instagram()->create([
+            'workspace_id' => $this->workspace->id,
+            'platform_user_id' => 'ig_123456789',
+            'token_expires_at' => now()->addDays(60),
+        ]),
+        'content_type' => ContentType::InstagramFeed,
+        'error_context' => [
+            'instagram_workflow' => [
+                'stage' => 'final_container',
+                'container_id' => 'container-dead',
+            ],
+            'category' => 'server_error',
+        ],
+    ]);
+
+    Mail::fake();
+    Queue::fake();
+
+    $this->artisan('posts:retry', ['post' => $this->post->id])
+        ->expectsConfirmation('Queue publish attempts for these failed platforms?', 'yes')
+        ->expectsOutputToContain('New')
+        ->assertSuccessful();
+
+    expect($failedInstagram->fresh()->error_context)->toBeNull();
+
+    Http::fake([
+        'https://graph.instagram.com/v25.0/ig_123456789/media' => Http::response(['id' => 'container-fresh'], 200),
+        'https://graph.instagram.com/v25.0/container-fresh*' => Http::response(['status_code' => 'FINISHED'], 200),
+        'https://graph.instagram.com/v25.0/ig_123456789/media_publish' => Http::response(['id' => 'media-456'], 200),
+        'https://graph.instagram.com/v25.0/media-456*' => Http::response([
+            'permalink' => 'https://www.instagram.com/p/DEF456/',
+        ], 200),
+    ]);
+
+    (new PublishToSocialPlatform($failedInstagram->fresh()))->handle();
+
+    expect($failedInstagram->fresh()->status)->toBe(PlatformStatus::Published)
+        ->and($failedInstagram->fresh()->platform_post_id)->toBe('media-456');
+
+    Http::assertSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/ig_123456789/media'));
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), 'container-dead'));
 });
