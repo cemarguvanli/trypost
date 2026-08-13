@@ -742,6 +742,69 @@ test('instagram publisher does not publish a container that never finishes proce
     Http::assertNotSent(fn ($request) => str_contains($request->url(), '/media_publish'));
 });
 
+test('instagram publisher retries a Business Use Case rate-limit on container status', function () {
+    $this->post->update([
+        'media' => [[
+            'id' => 'test-media-id',
+            'path' => 'media/2026-01/test-image.jpg',
+            'url' => 'https://example.com/media/2026-01/test-image.jpg',
+            'mime_type' => 'image/jpeg',
+            'original_filename' => 'test.jpg',
+        ]],
+    ]);
+
+    Http::fake([
+        'https://graph.instagram.com/v25.0/ig_123456789/media' => Http::response(['id' => 'container-123']),
+        'https://graph.instagram.com/v25.0/container-123*' => Http::response([
+            'error' => [
+                'message' => 'Instagram Platform rate limit reached.',
+                'code' => 80002,
+            ],
+        ], 400),
+    ]);
+
+    expect(fn () => $this->publisher->publish($this->postPlatform))
+        ->toThrow(function (PlatformUnavailableException $exception): void {
+            expect($exception->httpStatus)->toBe(400)
+                ->and($exception->context)->toBe([
+                    'instagram_workflow' => [
+                        'stage' => 'final_container',
+                        'container_id' => 'container-123',
+                    ],
+                ]);
+        });
+
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), '/media_publish'));
+});
+
+test('instagram publisher fails a confirmed container status rejection', function () {
+    $this->post->update([
+        'media' => [[
+            'id' => 'test-media-id',
+            'path' => 'media/2026-01/test-image.jpg',
+            'url' => 'https://example.com/media/2026-01/test-image.jpg',
+            'mime_type' => 'image/jpeg',
+            'original_filename' => 'test.jpg',
+        ]],
+    ]);
+
+    Http::fake([
+        'https://graph.instagram.com/v25.0/ig_123456789/media' => Http::response(['id' => 'container-123']),
+        'https://graph.instagram.com/v25.0/container-123*' => Http::response([
+            'error' => [
+                'message' => 'The requested resource does not exist',
+                'type' => 'OAuthException',
+                'code' => 100,
+            ],
+        ], 400),
+    ]);
+
+    expect(fn () => $this->publisher->publish($this->postPlatform))
+        ->toThrow(InstagramPublishException::class);
+
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), '/media_publish'));
+});
+
 test('instagram publisher throws exception when all carousel items fail', function () {
     $mediaItems = [];
     for ($i = 0; $i < 3; $i++) {

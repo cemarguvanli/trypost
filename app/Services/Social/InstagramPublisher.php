@@ -13,6 +13,7 @@ use App\Exceptions\Social\SocialPublishException;
 use App\Models\PostPlatform;
 use App\Services\Social\Concerns\CropsImageForAspectRatio;
 use App\Services\Social\Concerns\HasSocialHttpClient;
+use App\Services\Social\Meta\GraphError;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Log;
 
@@ -338,7 +339,7 @@ class InstagramPublisher
         ]);
 
         if ($statusResponse->failed()) {
-            if ($statusResponse->status() !== 429 && ! $statusResponse->serverError()) {
+            if (! GraphError::isTransientFailure($statusResponse)) {
                 $this->handleApiError($statusResponse);
             }
 

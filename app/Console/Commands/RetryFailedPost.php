@@ -22,7 +22,7 @@ class RetryFailedPost extends Command
     protected $signature = 'posts:retry
         {post : ID of the post whose failed platforms should be retried}';
 
-    protected $description = 'Retry failed platforms for a post as new publish attempts';
+    protected $description = 'Retry failed platforms, resuming in-flight remote publishes when a checkpoint exists';
 
     public function __construct(
         private readonly TikTokPhotoDerivativeCleaner $tiktokPhotoDerivativeCleaner,
@@ -55,16 +55,17 @@ class RetryFailedPost extends Command
         }
 
         $this->table(
-            ['Post platform ID', 'Platform', 'Account', 'Last error'],
+            ['Post platform ID', 'Platform', 'Account', 'Last error', 'Mode'],
             $failedPlatforms->map(fn (PostPlatform $postPlatform): array => [
                 $postPlatform->id,
                 $postPlatform->platform->value,
                 $postPlatform->display_username ?? '—',
                 $postPlatform->error_message ?? '—',
+                $this->resumableContext($postPlatform->error_context) === null ? 'New' : 'Resume',
             ])->all(),
         );
 
-        if (! $this->confirm('Start new publish attempts for these failed platforms?')) {
+        if (! $this->confirm('Queue publish attempts for these failed platforms?')) {
             $this->info('Retry cancelled.');
 
             return self::SUCCESS;
@@ -79,8 +80,8 @@ class RetryFailedPost extends Command
         }
 
         foreach ($retryEntries as $entry) {
-            if ($entry['platform'] === SocialPlatform::TikTok) {
-                $this->tiktokPhotoDerivativeCleaner->cleanup($entry['error_context'], $entry['id']);
+            if ($entry['platform'] === SocialPlatform::TikTok && data_get($entry['error_context'], 'tiktok_publish_id') === null) {
+                $this->tiktokPhotoDerivativeCleaner->cleanup($entry['original_error_context'], $entry['id']);
             }
 
             $postPlatform = PostPlatform::query()->findOrFail($entry['id']);
@@ -120,7 +121,8 @@ class RetryFailedPost extends Command
      * @return list<array{
      *     id: string,
      *     platform: SocialPlatform,
-     *     error_context: array<string, mixed>|null
+     *     error_context: array<string, mixed>|null,
+     *     original_error_context: array<string, mixed>|null
      * }>
      */
     private function prepareRetryEntries(Post $post): array
@@ -133,27 +135,60 @@ class RetryFailedPost extends Command
             }
 
             $platforms = $this->failedPlatforms($lockedPost, lockForUpdate: true);
-            $entries = $platforms->map(fn (PostPlatform $postPlatform): array => [
-                'id' => $postPlatform->id,
-                'platform' => $postPlatform->platform,
-                'error_context' => $postPlatform->error_context,
-            ])->all();
 
-            if ($entries === []) {
+            if ($platforms->isEmpty()) {
                 return [];
             }
 
-            $platforms->toQuery()->update([
-                'status' => PlatformStatus::Pending,
-                'platform_post_id' => null,
-                'platform_url' => null,
-                'error_message' => null,
-                'error_context' => null,
-                'published_at' => null,
-            ]);
+            $entries = [];
+
+            foreach ($platforms as $postPlatform) {
+                $nextContext = $this->resumableContext($postPlatform->error_context);
+                $entries[] = [
+                    'id' => $postPlatform->id,
+                    'platform' => $postPlatform->platform,
+                    'error_context' => $nextContext,
+                    'original_error_context' => $postPlatform->error_context,
+                ];
+
+                $postPlatform->update([
+                    'status' => PlatformStatus::Pending,
+                    'platform_post_id' => null,
+                    'platform_url' => null,
+                    'error_message' => null,
+                    'error_context' => $nextContext,
+                    'published_at' => null,
+                ]);
+            }
             $lockedPost->update(['status' => PostStatus::Publishing]);
 
             return $entries;
         });
+    }
+
+    /**
+     * @param  array<string, mixed>|null  $context
+     * @return array<string, mixed>|null
+     */
+    private function resumableContext(?array $context): ?array
+    {
+        $kept = [];
+        $publishId = data_get($context, 'tiktok_publish_id');
+        $workflow = data_get($context, 'instagram_workflow');
+
+        if (is_string($publishId) && $publishId !== '') {
+            $kept['tiktok_publish_id'] = $publishId;
+            $paths = data_get($context, 'tiktok_derivative_paths');
+
+            if (is_array($paths) && $paths !== []) {
+                $kept['tiktok_derivative_paths'] = $paths;
+            }
+        }
+
+        if (is_array($workflow) && $workflow !== []) {
+            $kept['instagram_workflow'] = $workflow;
+        }
+
+        return $kept === [] ? null : $kept;
     }
 }
