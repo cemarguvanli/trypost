@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Enums\Post\Status as PostStatus;
+use App\Enums\PostPlatform\ContentType;
 use App\Enums\PostPlatform\Status as PlatformStatus;
 use App\Jobs\PublishToSocialPlatform;
 use App\Models\Post;
@@ -112,6 +113,7 @@ test('it resumes a TikTok publish_id instead of starting from scratch', function
 
     $this->artisan('posts:retry', ['post' => $this->post->id])
         ->expectsConfirmation('Queue publish attempts for these failed platforms?', 'yes')
+        ->expectsOutputToContain('Resume')
         ->assertSuccessful();
 
     Storage::assertExists($derivativePath);
@@ -146,6 +148,7 @@ test('it keeps an Instagram workflow checkpoint on retry', function () {
 
     $this->artisan('posts:retry', ['post' => $this->post->id])
         ->expectsConfirmation('Queue publish attempts for these failed platforms?', 'yes')
+        ->expectsOutputToContain('Resume')
         ->assertSuccessful();
 
     expect($failedInstagram->fresh()->status)->toBe(PlatformStatus::Pending)
@@ -173,6 +176,7 @@ test('it removes stale TikTok derivatives when there is no publish_id to resume'
 
     $this->artisan('posts:retry', ['post' => $this->post->id])
         ->expectsConfirmation('Queue publish attempts for these failed platforms?', 'yes')
+        ->expectsOutputToContain('New')
         ->assertSuccessful();
 
     Storage::assertMissing($derivativePath);
@@ -309,4 +313,56 @@ test('a TikTok retry with a publish_id resumes instead of calling init', functio
         ->and($failedTikTok->fresh()->platform_post_id)->toBe('video_123');
 
     Http::assertNotSent(fn ($request) => str_contains($request->url(), '/init/'));
+});
+
+test('an Instagram retry with a workflow resumes instead of creating a container', function () {
+    $this->post->update([
+        'media' => [[
+            'id' => 'test-media-id',
+            'path' => 'media/2026-01/test-image.jpg',
+            'url' => 'https://example.com/media/2026-01/test-image.jpg',
+            'mime_type' => 'image/jpeg',
+            'original_filename' => 'test.jpg',
+        ]],
+    ]);
+
+    $failedInstagram = PostPlatform::factory()->instagram()->failed()->create([
+        'post_id' => $this->post->id,
+        'social_account_id' => SocialAccount::factory()->instagram()->create([
+            'workspace_id' => $this->workspace->id,
+            'platform_user_id' => 'ig_123456789',
+            'token_expires_at' => now()->addDays(60),
+        ]),
+        'content_type' => ContentType::InstagramFeed,
+        'error_context' => [
+            'instagram_workflow' => [
+                'stage' => 'final_container',
+                'container_id' => 'container-123',
+            ],
+            'retry_count' => 90,
+            'max_retries' => 90,
+        ],
+    ]);
+
+    Mail::fake();
+    Queue::fake();
+
+    $this->artisan('posts:retry', ['post' => $this->post->id])
+        ->expectsConfirmation('Queue publish attempts for these failed platforms?', 'yes')
+        ->assertSuccessful();
+
+    Http::fake([
+        'https://graph.instagram.com/v25.0/container-123*' => Http::response(['status_code' => 'FINISHED'], 200),
+        'https://graph.instagram.com/v25.0/ig_123456789/media_publish' => Http::response(['id' => 'media-123456789'], 200),
+        'https://graph.instagram.com/v25.0/media-123456789*' => Http::response([
+            'permalink' => 'https://www.instagram.com/p/ABC123/',
+        ], 200),
+    ]);
+
+    (new PublishToSocialPlatform($failedInstagram->fresh()))->handle();
+
+    expect($failedInstagram->fresh()->status)->toBe(PlatformStatus::Published)
+        ->and($failedInstagram->fresh()->platform_post_id)->toBe('media-123456789');
+
+    Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/ig_123456789/media'));
 });

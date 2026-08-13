@@ -139,6 +139,24 @@ test('tiktok publisher resumes an existing publish without creating a duplicate'
     Http::assertNotSent(fn ($request) => str_contains($request->url(), '/init/'));
 });
 
+test('tiktok publisher retries a rate-limited status fetch without creating a duplicate', function () {
+    $this->postPlatform->update([
+        'error_context' => ['tiktok_publish_id' => 'pub_existing'],
+    ]);
+
+    Http::fake([
+        $this->api.'/post/publish/status/fetch/' => Http::response(['error' => ['code' => 'rate_limit']], 429),
+    ]);
+
+    expect(fn () => $this->publisher->publish($this->postPlatform->fresh()))
+        ->toThrow(function (PlatformUnavailableException $exception): void {
+            expect($exception->httpStatus)->toBe(429)
+                ->and($exception->context['tiktok_publish_id'] ?? null)->toBe('pub_existing');
+        });
+
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), '/init/'));
+});
+
 test('tiktok publisher keeps photo derivatives while pending and prunes them on completion', function () {
     Storage::fake();
     $derivativePath = 'social-tiktok-photos/123e4567-e89b-12d3-a456-426614174000.jpg';
