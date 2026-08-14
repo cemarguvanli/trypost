@@ -52,7 +52,7 @@ class InstagramPublisher
         $pendingWorkflow = data_get($postPlatform->error_context, 'instagram_workflow');
 
         if (is_array($pendingWorkflow)) {
-            return $this->resumeWorkflow($instagramId, $accessToken, $content, $pendingWorkflow);
+            return $this->resumeWorkflow($instagramId, $accessToken, $content, $pendingWorkflow, $postPlatform->content_type);
         }
 
         $media = $postPlatform->post->mediaItems;
@@ -113,7 +113,7 @@ class InstagramPublisher
 
         $containerId = $this->createContainer($instagramId, $params, 'container');
 
-        return $this->finishContainer($instagramId, $accessToken, $containerId);
+        return $this->finishContainer($instagramId, $accessToken, $containerId, ContentType::InstagramFeed);
     }
 
     private function publishReel(string $instagramId, string $accessToken, ?string $content, $media): array
@@ -125,7 +125,7 @@ class InstagramPublisher
             'access_token' => $accessToken,
         ], 'reel container');
 
-        return $this->finishContainer($instagramId, $accessToken, $containerId);
+        return $this->finishContainer($instagramId, $accessToken, $containerId, ContentType::InstagramReel);
     }
 
     private function publishStory(string $instagramId, string $accessToken, $media): array
@@ -146,7 +146,7 @@ class InstagramPublisher
 
         $containerId = $this->createContainer($instagramId, $params, 'story container');
 
-        return $this->finishContainer($instagramId, $accessToken, $containerId);
+        return $this->finishContainer($instagramId, $accessToken, $containerId, ContentType::InstagramStory);
     }
 
     private function publishCarousel(string $instagramId, string $accessToken, ?string $content, $mediaCollection, ?string $aspectRatio): array
@@ -208,14 +208,14 @@ class InstagramPublisher
             );
         }
 
-        return $this->finishCarousel($instagramId, $accessToken, $content, $childContainers, $processingChildContainers);
+        return $this->finishCarousel($instagramId, $accessToken, $content, $childContainers, $processingChildContainers, ContentType::InstagramFeed);
     }
 
     /**
      * @param  list<string>  $childContainers
      * @param  list<string>  $processingChildContainers
      */
-    private function finishCarousel(string $instagramId, string $accessToken, ?string $content, array $childContainers, array $processingChildContainers): array
+    private function finishCarousel(string $instagramId, string $accessToken, ?string $content, array $childContainers, array $processingChildContainers, ?ContentType $contentType): array
     {
         $workflow = [
             'stage' => self::WORKFLOW_CAROUSEL_CHILDREN,
@@ -234,13 +234,13 @@ class InstagramPublisher
             'access_token' => $accessToken,
         ], 'carousel container');
 
-        return $this->finishContainer($instagramId, $accessToken, $carouselId);
+        return $this->finishContainer($instagramId, $accessToken, $carouselId, $contentType);
     }
 
     /**
      * @param  array<string, mixed>  $workflow
      */
-    private function resumeWorkflow(string $instagramId, string $accessToken, ?string $content, array $workflow): array
+    private function resumeWorkflow(string $instagramId, string $accessToken, ?string $content, array $workflow, ?ContentType $contentType): array
     {
         $stage = data_get($workflow, 'stage');
 
@@ -248,7 +248,7 @@ class InstagramPublisher
             $containerId = data_get($workflow, 'container_id');
 
             if (is_string($containerId) && $containerId !== '') {
-                return $this->finishContainer($instagramId, $accessToken, $containerId);
+                return $this->finishContainer($instagramId, $accessToken, $containerId, $contentType);
             }
         }
 
@@ -263,6 +263,7 @@ class InstagramPublisher
                     $content,
                     $children,
                     $processingChildren,
+                    $contentType,
                 );
             }
         }
@@ -273,7 +274,7 @@ class InstagramPublisher
         );
     }
 
-    private function finishContainer(string $instagramId, string $accessToken, string $containerId): array
+    private function finishContainer(string $instagramId, string $accessToken, string $containerId, ?ContentType $contentType): array
     {
         $status = $this->waitForMediaProcessing($containerId, $accessToken, [
             'stage' => self::WORKFLOW_FINAL_CONTAINER,
@@ -281,7 +282,7 @@ class InstagramPublisher
         ]);
 
         if ($status === ContainerStatus::Published) {
-            return $this->alreadyPublishedContainer($instagramId, $accessToken, $containerId);
+            return $this->alreadyPublishedContainer($instagramId, $accessToken, $containerId, $contentType);
         }
 
         return $this->publishContainer($instagramId, $accessToken, $containerId);
@@ -369,13 +370,16 @@ class InstagramPublisher
 
     /**
      * The container node has no published media id. After media_publish already
-     * succeeded, the newest item on GET /{IG_USER_ID}/media is the recovery path.
+     * succeeded, recover from the matching IG User edge: /stories for stories
+     * (stories are not on /media), otherwise /media.
      *
      * @return array{id: string, url: string|null}
      */
-    private function alreadyPublishedContainer(string $instagramId, string $accessToken, string $containerId): array
+    private function alreadyPublishedContainer(string $instagramId, string $accessToken, string $containerId, ?ContentType $contentType): array
     {
-        $response = $this->socialHttp()->get("{$this->baseUrl}/{$instagramId}/media", [
+        $edge = $contentType === ContentType::InstagramStory ? 'stories' : 'media';
+
+        $response = $this->socialHttp()->get("{$this->baseUrl}/{$instagramId}/{$edge}", [
             'fields' => 'id,permalink',
             'limit' => 1,
             'access_token' => $accessToken,

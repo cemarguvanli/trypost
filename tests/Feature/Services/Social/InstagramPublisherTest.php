@@ -941,6 +941,53 @@ test('instagram publisher still completes a published container when recent medi
     Http::assertNotSent(fn ($request) => str_contains($request->url(), '/media_publish'));
 });
 
+test('instagram publisher recovers a published story from /stories not /media', function () {
+    $this->postPlatform->update([
+        'content_type' => ContentType::InstagramStory,
+        'error_context' => [
+            'instagram_workflow' => [
+                'stage' => 'final_container',
+                'container_id' => 'container-123',
+            ],
+        ],
+    ]);
+
+    Http::fake(function (Request $request) {
+        if ($request->method() === 'GET' && str_contains($request->url(), '/container-123')) {
+            return Http::response(['status_code' => 'PUBLISHED'], 200);
+        }
+
+        if ($request->method() === 'GET' && str_contains($request->url(), '/ig_123456789/stories')) {
+            return Http::response([
+                'data' => [[
+                    'id' => 'story-already-published',
+                    'permalink' => 'https://www.instagram.com/stories/testuser/1/',
+                ]],
+            ], 200);
+        }
+
+        if ($request->method() === 'GET' && str_contains($request->url(), '/ig_123456789/media')) {
+            return Http::response([
+                'data' => [[
+                    'id' => 'feed-must-not-be-used',
+                    'permalink' => 'https://www.instagram.com/p/FEED/',
+                ]],
+            ], 200);
+        }
+
+        return Http::response(['error' => ['message' => 'unexpected']], 500);
+    });
+
+    expect($this->publisher->publish($this->postPlatform->fresh()))->toBe([
+        'id' => 'story-already-published',
+        'url' => 'https://www.instagram.com/stories/testuser/1/',
+    ]);
+
+    Http::assertSent(fn (Request $request) => $request->method() === 'GET' && str_contains($request->url(), '/ig_123456789/stories'));
+    Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/ig_123456789/media'));
+    Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/media_publish'));
+});
+
 test('instagram publisher retries a 5xx on container status without publishing', function () {
     $this->post->update([
         'media' => [[
