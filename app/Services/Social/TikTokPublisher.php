@@ -14,6 +14,7 @@ use App\Models\PostPlatform;
 use App\Models\SocialAccount;
 use App\Services\Media\MediaOptimizer;
 use App\Services\Social\Concerns\HasSocialHttpClient;
+use App\Support\Social\PublishCheckpoint;
 use App\Support\Social\TikTokPhotoDerivativeCleaner;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
@@ -26,8 +27,6 @@ use Throwable;
 class TikTokPublisher
 {
     use HasSocialHttpClient;
-
-    private const PHOTO_DERIVATIVE_DIRECTORY = 'social-tiktok-photos';
 
     private const int STATUS_RETRY_DELAY_SECONDS = 30;
 
@@ -56,15 +55,13 @@ class TikTokPublisher
 
         $this->accessToken = $account->access_token;
 
-        $pendingPublishId = data_get($postPlatform->error_context, 'tiktok_publish_id');
+        $pendingPublishId = PublishCheckpoint::tiktokPublishId($postPlatform->error_context);
 
-        if (is_string($pendingPublishId) && $pendingPublishId !== '') {
-            $derivatives = data_get($postPlatform->error_context, 'tiktok_derivative_paths', []);
-
+        if ($pendingPublishId !== null) {
             return $this->completePublishWithCleanup(
                 $postPlatform,
                 $pendingPublishId,
-                is_array($derivatives) ? $derivatives : [],
+                PublishCheckpoint::tiktokDerivativePaths($postPlatform->error_context),
             );
         }
 
@@ -204,14 +201,7 @@ class TikTokPublisher
 
         $data = $response->json();
 
-        $publishId = data_get($data, 'data.publish_id');
-
-        if (! is_string($publishId) || $publishId === '') {
-            throw new TikTokPublishException(
-                userMessage: 'TikTok did not return a publish_id',
-                category: ErrorCategory::ServerError,
-            );
-        }
+        $publishId = $this->requirePublishId(data_get($data, 'data.publish_id'));
 
         $this->rememberPublishId($postPlatform, $publishId);
 
@@ -271,14 +261,7 @@ class TikTokPublisher
                 $this->handleApiError($response);
             }
 
-            $publishId = data_get($response->json(), 'data.publish_id');
-
-            if (! is_string($publishId) || $publishId === '') {
-                throw new TikTokPublishException(
-                    userMessage: 'TikTok did not return a publish_id',
-                    category: ErrorCategory::ServerError,
-                );
-            }
+            $publishId = $this->requirePublishId(data_get($response->json(), 'data.publish_id'));
 
             $this->rememberPublishId($postPlatform, $publishId, $derivatives);
         } catch (Throwable $e) {
@@ -354,7 +337,7 @@ class TikTokPublisher
             $optimized = app(MediaOptimizer::class)->optimizeImage($tempInput, Platform::TikTok);
 
             try {
-                $path = self::PHOTO_DERIVATIVE_DIRECTORY.'/'.Str::uuid()->toString().'.jpg';
+                $path = TikTokPhotoDerivativeCleaner::DIRECTORY.'/'.Str::uuid()->toString().'.jpg';
                 Storage::put($path, file_get_contents($optimized));
             } finally {
                 @unlink($optimized);
@@ -401,6 +384,20 @@ class TikTokPublisher
         };
     }
 
+    private function requirePublishId(mixed $publishId): string
+    {
+        $resolved = is_string($publishId) && $publishId !== '' ? $publishId : null;
+
+        if ($resolved === null) {
+            throw new TikTokPublishException(
+                userMessage: 'TikTok did not return a publish_id',
+                category: ErrorCategory::ServerError,
+            );
+        }
+
+        return $resolved;
+    }
+
     /**
      * Persist the publish_id before status polling so a crash after /init/
      * can resume without creating a second publish.
@@ -411,11 +408,11 @@ class TikTokPublisher
     {
         $context = [
             ...($postPlatform->error_context ?? []),
-            'tiktok_publish_id' => $publishId,
+            PublishCheckpoint::TIKTOK_PUBLISH_ID => $publishId,
         ];
 
         if ($derivatives !== []) {
-            $context['tiktok_derivative_paths'] = $derivatives;
+            $context[PublishCheckpoint::TIKTOK_DERIVATIVE_PATHS] = $derivatives;
         }
 
         $postPlatform->update([
@@ -428,7 +425,7 @@ class TikTokPublisher
         return new PlatformUnavailableException(
             message: "TikTok is still processing publish_id {$publishId}",
             httpStatus: $httpStatus,
-            context: ['tiktok_publish_id' => $publishId],
+            context: [PublishCheckpoint::TIKTOK_PUBLISH_ID => $publishId],
             retryDelaySeconds: self::STATUS_RETRY_DELAY_SECONDS,
             maxRetries: self::STATUS_MAX_RETRIES,
         );
@@ -453,7 +450,7 @@ class TikTokPublisher
 
             return $result;
         } catch (PlatformUnavailableException $e) {
-            $e->context['tiktok_derivative_paths'] = $derivatives;
+            $e->context[PublishCheckpoint::TIKTOK_DERIVATIVE_PATHS] = $derivatives;
 
             throw $e;
         } catch (TikTokPublishException $e) {
@@ -471,6 +468,7 @@ class TikTokPublisher
     {
         $statusData = $this->waitForPublishStatus($publishId);
         $postId = data_get($statusData, 'publicaly_available_post_id.0');
+        $postId = is_string($postId) && $postId !== '' ? $postId : null;
 
         return [
             'id' => $postId ?? $publishId,

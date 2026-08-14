@@ -11,6 +11,7 @@ use App\Exceptions\Social\ErrorCategory;
 use App\Jobs\PublishToSocialPlatform;
 use App\Models\Post;
 use App\Models\PostPlatform;
+use App\Support\Social\PublishCheckpoint;
 use App\Support\Social\TikTokPhotoDerivativeCleaner;
 use Illuminate\Console\Command;
 use Illuminate\Database\Eloquent\Builder;
@@ -81,7 +82,7 @@ class RetryFailedPost extends Command
         }
 
         foreach ($retryEntries as $entry) {
-            if ($entry['platform'] === SocialPlatform::TikTok && data_get($entry['error_context'], 'tiktok_publish_id') === null) {
+            if ($entry['platform'] === SocialPlatform::TikTok && PublishCheckpoint::tiktokPublishId($entry['error_context']) === null) {
                 $this->tiktokPhotoDerivativeCleaner->cleanup($entry['original_error_context'], $entry['id']);
             }
 
@@ -175,28 +176,25 @@ class RetryFailedPost extends Command
      */
     private function resumableContext(?array $context): ?array
     {
-        $category = data_get($context, 'category');
-        $resolved = is_string($category) ? ErrorCategory::tryFrom($category) : null;
-
-        if ($resolved?->isResumable() !== true) {
+        if (ErrorCategory::tryFromContext($context)?->isResumable() !== true) {
             return null;
         }
 
         $kept = [];
-        $publishId = data_get($context, 'tiktok_publish_id');
-        $workflow = data_get($context, 'instagram_workflow');
+        $publishId = PublishCheckpoint::tiktokPublishId($context);
+        $workflow = PublishCheckpoint::instagramWorkflow($context);
 
-        if (is_string($publishId) && $publishId !== '') {
-            $kept['tiktok_publish_id'] = $publishId;
-            $paths = data_get($context, 'tiktok_derivative_paths');
+        if ($publishId !== null) {
+            $kept[PublishCheckpoint::TIKTOK_PUBLISH_ID] = $publishId;
+            $paths = PublishCheckpoint::tiktokDerivativePaths($context);
 
-            if (is_array($paths) && $paths !== []) {
-                $kept['tiktok_derivative_paths'] = $paths;
+            if ($paths !== []) {
+                $kept[PublishCheckpoint::TIKTOK_DERIVATIVE_PATHS] = $paths;
             }
         }
 
-        if (is_array($workflow) && $workflow !== []) {
-            $kept['instagram_workflow'] = $workflow;
+        if ($workflow !== null) {
+            $kept[PublishCheckpoint::INSTAGRAM_WORKFLOW] = $workflow;
         }
 
         return $kept === [] ? null : $kept;

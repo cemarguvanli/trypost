@@ -24,4 +24,14 @@ enum ErrorCategory: string
             default => false,
         };
     }
+
+    /**
+     * @param  array<string, mixed>|null  $context
+     */
+    public static function tryFromContext(?array $context): ?self
+    {
+        $category = data_get($context, 'category');
+
+        return is_string($category) ? self::tryFrom($category) : null;
+    }
 }

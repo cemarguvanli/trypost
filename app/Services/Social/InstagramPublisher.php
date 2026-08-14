@@ -15,6 +15,7 @@ use App\Models\PostPlatform;
 use App\Services\Social\Concerns\CropsImageForAspectRatio;
 use App\Services\Social\Concerns\HasSocialHttpClient;
 use App\Services\Social\Meta\GraphError;
+use App\Support\Social\PublishCheckpoint;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Log;
 
@@ -52,9 +53,9 @@ class InstagramPublisher
 
         $content = $postPlatform->post->content ? app(ContentSanitizer::class)->sanitize($postPlatform->post->content, $postPlatform->platform) : null;
 
-        $pendingWorkflow = data_get($postPlatform->error_context, 'instagram_workflow');
+        $pendingWorkflow = PublishCheckpoint::instagramWorkflow($postPlatform->error_context);
 
-        if (is_array($pendingWorkflow)) {
+        if ($pendingWorkflow !== null) {
             return $this->resumeWorkflow($instagramId, $accessToken, $content, $pendingWorkflow);
         }
 
@@ -189,9 +190,9 @@ class InstagramPublisher
                 continue;
             }
 
-            $childId = $containerResponse->json()['id'] ?? null;
+            $childId = $this->stringId(data_get($containerResponse->json(), 'id'));
 
-            if (! $childId) {
+            if ($childId === null) {
                 Log::error('Instagram carousel item creation returned no ID', ['body' => $this->redactResponseBody($containerResponse->body())]);
 
                 continue;
@@ -245,18 +246,18 @@ class InstagramPublisher
      */
     private function resumeWorkflow(string $instagramId, string $accessToken, ?string $content, array $workflow): array
     {
-        $mediaId = data_get($workflow, 'media_id');
+        $mediaId = $this->stringId(data_get($workflow, 'media_id'));
 
-        if (is_string($mediaId) && $mediaId !== '') {
+        if ($mediaId !== null) {
             return $this->publishedMedia($mediaId, $accessToken);
         }
 
         $stage = data_get($workflow, 'stage');
 
         if ($stage === self::WORKFLOW_FINAL_CONTAINER) {
-            $containerId = data_get($workflow, 'container_id');
+            $containerId = $this->stringId(data_get($workflow, 'container_id'));
 
-            if (is_string($containerId) && $containerId !== '') {
+            if ($containerId !== null) {
                 return $this->finishContainer($instagramId, $accessToken, $containerId);
             }
         }
@@ -311,14 +312,10 @@ class InstagramPublisher
             $this->handleApiError($publishResponse);
         }
 
-        $mediaId = $publishResponse->json()['id'] ?? null;
-
-        if (! is_string($mediaId) || $mediaId === '') {
-            throw new InstagramPublishException(
-                userMessage: 'Instagram publish failed: no media ID returned',
-                category: ErrorCategory::ServerError,
-            );
-        }
+        $mediaId = $this->requireGraphId(
+            $publishResponse->json()['id'] ?? null,
+            'Instagram publish failed: no media ID returned',
+        );
 
         $this->rememberPublishedMedia($containerId, $mediaId);
 
@@ -376,7 +373,7 @@ class InstagramPublisher
         $this->postPlatform->update([
             'error_context' => [
                 ...($this->postPlatform->error_context ?? []),
-                'instagram_workflow' => [
+                PublishCheckpoint::INSTAGRAM_WORKFLOW => [
                     'stage' => self::WORKFLOW_FINAL_CONTAINER,
                     'container_id' => $containerId,
                     'media_id' => $mediaId,
@@ -399,7 +396,7 @@ class InstagramPublisher
 
         return [
             'id' => $mediaId,
-            'url' => is_string($permalink) ? $permalink : null,
+            'url' => $this->stringId($permalink),
         ];
     }
 
@@ -426,7 +423,7 @@ class InstagramPublisher
         return new PlatformUnavailableException(
             message: "Instagram is still processing container {$containerId}",
             httpStatus: $httpStatus,
-            context: ['instagram_workflow' => $workflow],
+            context: [PublishCheckpoint::INSTAGRAM_WORKFLOW => $workflow],
             retryDelaySeconds: self::STATUS_RETRY_DELAY_SECONDS,
             maxRetries: self::STATUS_MAX_RETRIES,
         );
@@ -447,16 +444,29 @@ class InstagramPublisher
             $this->handleApiError($response);
         }
 
-        $containerId = data_get($response->json(), 'id');
+        return $this->requireGraphId(
+            data_get($response->json(), 'id'),
+            "Instagram {$label} creation failed: No container ID returned",
+        );
+    }
 
-        if (! is_string($containerId) || $containerId === '') {
+    private function requireGraphId(mixed $id, string $missingMessage): string
+    {
+        $resolved = $this->stringId($id);
+
+        if ($resolved === null) {
             throw new InstagramPublishException(
-                userMessage: "Instagram {$label} creation failed: No container ID returned",
+                userMessage: $missingMessage,
                 category: ErrorCategory::ServerError,
             );
         }
 
-        return $containerId;
+        return $resolved;
+    }
+
+    private function stringId(mixed $value): ?string
+    {
+        return is_string($value) && $value !== '' ? $value : null;
     }
 
     /**
@@ -464,9 +474,14 @@ class InstagramPublisher
      */
     private function stringList(mixed $values): ?array
     {
-        return is_array($values)
-            ? array_values(array_filter($values, fn (mixed $value): bool => is_string($value) && $value !== ''))
-            : null;
+        if (! is_array($values)) {
+            return null;
+        }
+
+        return array_values(array_filter(
+            $values,
+            fn (mixed $value): bool => $this->stringId($value) !== null,
+        ));
     }
 
     private function handleApiError(Response $response): never

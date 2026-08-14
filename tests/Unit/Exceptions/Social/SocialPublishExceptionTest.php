@@ -103,3 +103,12 @@ test('error category marks only in-flight interruptions as resumable', function 
     'rate limit' => [ErrorCategory::RateLimit, false],
     'unknown' => [ErrorCategory::Unknown, false],
 ]);
+
+test('error category tryFromContext reads a stored category', function (?array $context, ?ErrorCategory $expected) {
+    expect(ErrorCategory::tryFromContext($context))->toBe($expected);
+})->with([
+    'resumable' => [['category' => 'token_expired'], ErrorCategory::TokenExpired],
+    'unknown string' => [['category' => 'not-a-category'], null],
+    'missing' => [[], null],
+    'null context' => [null, null],
+]);
