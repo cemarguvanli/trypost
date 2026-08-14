@@ -7,6 +7,7 @@ namespace App\Console\Commands;
 use App\Enums\Post\Status as PostStatus;
 use App\Enums\PostPlatform\Status as PlatformStatus;
 use App\Enums\SocialAccount\Platform as SocialPlatform;
+use App\Exceptions\Social\ErrorCategory;
 use App\Jobs\PublishToSocialPlatform;
 use App\Models\Post;
 use App\Models\PostPlatform;
@@ -174,7 +175,10 @@ class RetryFailedPost extends Command
      */
     private function resumableContext(?array $context): ?array
     {
-        if (! in_array(data_get($context, 'category'), ['platform_unavailable', 'timeout'], true)) {
+        $category = data_get($context, 'category');
+        $resolved = is_string($category) ? ErrorCategory::tryFrom($category) : null;
+
+        if ($resolved?->isResumable() !== true) {
             return null;
         }
 

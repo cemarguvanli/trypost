@@ -11,6 +11,7 @@ use App\Enums\SocialAccount\Platform as SocialPlatform;
 use App\Enums\SocialAccount\Status;
 use App\Events\PostPlatformStatusUpdated;
 use App\Exceptions\PlatformUnavailableException;
+use App\Exceptions\Social\ErrorCategory;
 use App\Exceptions\Social\SocialPublishException;
 use App\Exceptions\TokenExpiredException;
 use App\Mail\PostPublished;
@@ -103,7 +104,7 @@ class PublishToSocialPlatform implements ShouldBeUnique, ShouldQueue
 
         if ($this->postPlatform->socialAccount->status === Status::TokenExpired) {
             $this->failAndFinalize(__('posts.errors.account_token_expired'), [
-                'category' => 'token_expired',
+                'category' => ErrorCategory::TokenExpired->value,
                 'failed_at' => now()->toIso8601String(),
             ]);
 
@@ -155,7 +156,7 @@ class PublishToSocialPlatform implements ShouldBeUnique, ShouldQueue
                 ]);
 
                 $this->markPlatformAsFailed($e->getMessage(), [
-                    'category' => 'token_expired',
+                    'category' => ErrorCategory::TokenExpired->value,
                     'platform_error_code' => $e->platformErrorCode,
                     'failed_at' => now()->toIso8601String(),
                 ]);
@@ -179,7 +180,7 @@ class PublishToSocialPlatform implements ShouldBeUnique, ShouldQueue
                     'error' => $e->getMessage(),
                 ]);
                 $this->markPlatformAsFailed($this->safeFailureMessage($e), [
-                    'category' => 'unknown',
+                    'category' => ErrorCategory::Unknown->value,
                     'failed_at' => now()->toIso8601String(),
                     'content_length' => mb_strlen($this->postPlatform->post->content ?? ''),
                     'media_count' => count($this->postPlatform->post->media ?? []),
@@ -217,7 +218,7 @@ class PublishToSocialPlatform implements ShouldBeUnique, ShouldQueue
         $this->failAndFinalize(
             'Missing permissions: '.implode(', ', $missingScopes).'. Please reconnect your account.',
             [
-                'category' => 'permission',
+                'category' => ErrorCategory::Permission->value,
                 'missing_scopes' => $missingScopes,
                 'failed_at' => now()->toIso8601String(),
             ],
@@ -238,7 +239,7 @@ class PublishToSocialPlatform implements ShouldBeUnique, ShouldQueue
         $context = [
             ...($this->postPlatform->error_context ?? []),
             ...$e->context,
-            'category' => 'platform_unavailable',
+            'category' => ErrorCategory::PlatformUnavailable->value,
             'http_status' => $e->httpStatus,
             'retry_count' => $retryCount,
             'max_retries' => $maxRetries,
@@ -400,7 +401,7 @@ class PublishToSocialPlatform implements ShouldBeUnique, ShouldQueue
         $this->markPlatformAsFailed(
             $exception ? $this->safeFailureMessage($exception) : 'Unknown error',
             [
-                'category' => 'job_failed',
+                'category' => ErrorCategory::JobFailed->value,
                 'failed_at' => now()->toIso8601String(),
             ]
         );

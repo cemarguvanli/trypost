@@ -6,6 +6,7 @@ namespace App\Console\Commands;
 
 use App\Enums\Post\Status as PostStatus;
 use App\Enums\PostPlatform\Status as PlatformStatus;
+use App\Exceptions\Social\ErrorCategory;
 use App\Models\Post;
 use App\Models\PostPlatform;
 use App\Support\Social\TikTokPhotoDerivativeCleaner;
@@ -48,7 +49,7 @@ class RecoverStuckPosts extends Command
                         'error_message' => __('posts.errors.publishing_timed_out'),
                         'error_context' => [
                             ...($postPlatform->error_context ?? []),
-                            'category' => 'timeout',
+                            'category' => ErrorCategory::Timeout->value,
                             'failed_at' => now()->toIso8601String(),
                         ],
                     ]);

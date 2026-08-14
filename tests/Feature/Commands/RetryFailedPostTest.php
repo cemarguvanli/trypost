@@ -5,6 +5,7 @@ declare(strict_types=1);
 use App\Enums\Post\Status as PostStatus;
 use App\Enums\PostPlatform\ContentType;
 use App\Enums\PostPlatform\Status as PlatformStatus;
+use App\Exceptions\Social\ErrorCategory;
 use App\Jobs\PublishToSocialPlatform;
 use App\Models\Post;
 use App\Models\PostPlatform;
@@ -125,6 +126,34 @@ test('it resumes a TikTok publish_id instead of starting from scratch', function
 
     Bus::assertDispatched(PublishToSocialPlatform::class, fn (PublishToSocialPlatform $job): bool => $job->postPlatform->is($failedTikTok));
 });
+
+test('it resumes a TikTok publish_id after an account or job interruption', function (ErrorCategory $category) {
+    Bus::fake([PublishToSocialPlatform::class]);
+
+    $failedTikTok = PostPlatform::factory()->tiktok()->failed()->create([
+        'post_id' => $this->post->id,
+        'social_account_id' => SocialAccount::factory()->tiktok()->create([
+            'workspace_id' => $this->workspace->id,
+        ]),
+        'error_context' => [
+            'tiktok_publish_id' => 'pub_in_flight',
+            'category' => $category->value,
+        ],
+    ]);
+
+    $this->artisan('posts:retry', ['post' => $this->post->id])
+        ->expectsConfirmation('Queue publish attempts for these failed platforms?', 'yes')
+        ->expectsOutputToContain('Resume')
+        ->assertSuccessful();
+
+    expect($failedTikTok->fresh()->status)->toBe(PlatformStatus::Pending)
+        ->and($failedTikTok->fresh()->error_context)->toBe([
+            'tiktok_publish_id' => 'pub_in_flight',
+        ]);
+})->with([
+    'token expired' => [ErrorCategory::TokenExpired],
+    'job failed' => [ErrorCategory::JobFailed],
+]);
 
 test('it keeps an Instagram workflow checkpoint on retry', function () {
     Bus::fake([PublishToSocialPlatform::class]);

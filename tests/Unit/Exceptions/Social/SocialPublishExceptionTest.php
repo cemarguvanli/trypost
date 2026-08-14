@@ -76,11 +76,30 @@ test('fromApiResponse creates exception from response', function () {
 });
 
 test('error category enum has all expected cases', function () {
-    expect(ErrorCategory::cases())->toHaveCount(6)
+    expect(ErrorCategory::cases())->toHaveCount(10)
         ->and(ErrorCategory::MediaFormat->value)->toBe('media_format')
         ->and(ErrorCategory::RateLimit->value)->toBe('rate_limit')
         ->and(ErrorCategory::Permission->value)->toBe('permission')
         ->and(ErrorCategory::ContentPolicy->value)->toBe('content_policy')
         ->and(ErrorCategory::ServerError->value)->toBe('server_error')
-        ->and(ErrorCategory::Unknown->value)->toBe('unknown');
+        ->and(ErrorCategory::Unknown->value)->toBe('unknown')
+        ->and(ErrorCategory::PlatformUnavailable->value)->toBe('platform_unavailable')
+        ->and(ErrorCategory::Timeout->value)->toBe('timeout')
+        ->and(ErrorCategory::TokenExpired->value)->toBe('token_expired')
+        ->and(ErrorCategory::JobFailed->value)->toBe('job_failed');
 });
+
+test('error category marks only in-flight interruptions as resumable', function (ErrorCategory $category, bool $resumable) {
+    expect($category->isResumable())->toBe($resumable);
+})->with([
+    'platform unavailable' => [ErrorCategory::PlatformUnavailable, true],
+    'timeout' => [ErrorCategory::Timeout, true],
+    'token expired' => [ErrorCategory::TokenExpired, true],
+    'job failed' => [ErrorCategory::JobFailed, true],
+    'media format' => [ErrorCategory::MediaFormat, false],
+    'content policy' => [ErrorCategory::ContentPolicy, false],
+    'server error' => [ErrorCategory::ServerError, false],
+    'permission' => [ErrorCategory::Permission, false],
+    'rate limit' => [ErrorCategory::RateLimit, false],
+    'unknown' => [ErrorCategory::Unknown, false],
+]);
