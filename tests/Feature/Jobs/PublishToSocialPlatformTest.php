@@ -930,6 +930,45 @@ test('terminal TikTok account guards keep derivatives while a publish_id can be 
     'missing publish scopes' => 'missing_scopes',
 ]);
 
+test('terminal TikTok account guards prune derivatives when there is no publish_id', function (string $guard) {
+    Event::fake();
+    Mail::fake();
+    Storage::fake();
+
+    $path = 'social-tiktok-photos/'.fake()->uuid().'.jpg';
+    Storage::put($path, 'image');
+
+    $accountAttributes = match ($guard) {
+        'inactive' => ['is_active' => false],
+        'disconnected' => ['status' => AccountStatus::Disconnected],
+        'token_expired' => ['status' => AccountStatus::TokenExpired],
+        'missing_scopes' => ['scopes' => []],
+    };
+    $account = SocialAccount::factory()->tiktok()->create([
+        'workspace_id' => $this->workspace->id,
+        ...$accountAttributes,
+    ]);
+    $platform = PostPlatform::factory()->tiktok()->create([
+        'post_id' => $this->post->id,
+        'social_account_id' => $account->id,
+        'status' => PlatformStatus::Retrying,
+        'error_context' => [
+            'tiktok_derivative_paths' => [$path],
+        ],
+    ]);
+
+    (new PublishToSocialPlatform($platform))->handle();
+
+    Storage::assertMissing($path);
+    expect($platform->fresh()->status)->toBe(PlatformStatus::Failed)
+        ->and($platform->fresh()->error_context['tiktok_publish_id'] ?? null)->toBeNull();
+})->with([
+    'inactive account' => 'inactive',
+    'disconnected account' => 'disconnected',
+    'expired token' => 'token_expired',
+    'missing publish scopes' => 'missing_scopes',
+]);
+
 test('tiktok photo publish resumes after a status-fetch token expiry without a second init', function () {
     Event::fake();
     Mail::fake();

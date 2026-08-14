@@ -58,6 +58,20 @@ test('it prunes derivatives when there is no publish_id to resume', function () 
     Storage::assertMissing($path);
 });
 
+test('it prunes derivatives when the publish_id is an empty string', function () {
+    Storage::fake();
+
+    $path = 'social-tiktok-photos/123e4567-e89b-12d3-a456-426614174000.jpg';
+    Storage::put($path, 'image');
+
+    app(TikTokPhotoDerivativeCleaner::class)->cleanupUnlessPublishInFlight([
+        'tiktok_publish_id' => '',
+        'tiktok_derivative_paths' => [$path],
+    ]);
+
+    Storage::assertMissing($path);
+});
+
 test('it ignores invalid retry context', function () {
     Storage::fake();
 

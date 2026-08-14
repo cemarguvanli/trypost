@@ -116,6 +116,35 @@ test('tiktok publisher does not report success before processing completes', fun
     Http::assertSentCount(2);
 });
 
+test('tiktok publisher checkpoints a video publish_id when status fetch reports an expired token', function () {
+    $this->post->update([
+        'media' => [[
+            'id' => 'test-media-video',
+            'path' => 'media/2026-01/test-video.mp4',
+            'url' => 'https://example.com/media/2026-01/test-video.mp4',
+            'mime_type' => 'video/mp4',
+            'original_filename' => 'test-video.mp4',
+        ]],
+    ]);
+
+    Http::fake([
+        $this->api.'/post/publish/video/init/' => Http::response(['data' => ['publish_id' => 'pub_video_401']]),
+        $this->api.'/post/publish/status/fetch/' => Http::response([
+            'error' => [
+                'code' => 'access_token_invalid',
+                'message' => 'Access token is invalid',
+            ],
+        ], 401),
+    ]);
+
+    expect(fn () => $this->publisher->publish($this->postPlatform))
+        ->toThrow(TokenExpiredException::class);
+
+    expect($this->postPlatform->fresh()->error_context['tiktok_publish_id'] ?? null)->toBe('pub_video_401');
+
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), '/content/init/'));
+});
+
 test('tiktok publisher checkpoints a photo publish_id before polling status', function () {
     $this->postPlatform->update(['meta' => ['privacy_level' => 'SELF_ONLY']]);
     $this->post->update([
