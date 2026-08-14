@@ -5,6 +5,7 @@ declare(strict_types=1);
 use App\Enums\PostPlatform\ContentType;
 use App\Enums\SocialAccount\Platform;
 use App\Exceptions\PlatformUnavailableException;
+use App\Exceptions\Social\ErrorCategory;
 use App\Exceptions\Social\InstagramPublishException;
 use App\Exceptions\TokenExpiredException;
 use App\Models\Post;
@@ -14,6 +15,7 @@ use App\Models\User;
 use App\Models\Workspace;
 use App\Services\Media\MediaOptimizer;
 use App\Services\Social\InstagramPublisher;
+use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use Intervention\Image\Drivers\Gd\Driver;
@@ -845,6 +847,98 @@ test('instagram publisher fails a resumed container that reports ERROR', functio
 
     Http::assertNotSent(fn ($request) => str_contains($request->url(), '/media_publish'));
     Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_contains($request->url(), '/media'));
+});
+
+test('instagram publisher fails an expired container instead of retrying it', function () {
+    $this->postPlatform->update([
+        'error_context' => [
+            'instagram_workflow' => [
+                'stage' => 'final_container',
+                'container_id' => 'container-123',
+            ],
+        ],
+    ]);
+
+    Http::fake([
+        'https://graph.instagram.com/v25.0/container-123*' => Http::response(['status_code' => 'EXPIRED'], 200),
+    ]);
+
+    expect(fn () => $this->publisher->publish($this->postPlatform->fresh()))
+        ->toThrow(function (InstagramPublishException $exception): void {
+            expect($exception->userMessage)->toBe('Media container expired. Please try again in a few minutes.')
+                ->and($exception->category)->toBe(ErrorCategory::ServerError);
+        });
+
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), '/media_publish'));
+    Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_contains($request->url(), '/media'));
+});
+
+test('instagram publisher completes a published container without calling media_publish', function () {
+    $this->postPlatform->update([
+        'error_context' => [
+            'instagram_workflow' => [
+                'stage' => 'final_container',
+                'container_id' => 'container-123',
+            ],
+        ],
+    ]);
+
+    Http::fake(function (Request $request) {
+        if ($request->method() === 'GET' && str_contains($request->url(), '/container-123')) {
+            return Http::response(['status_code' => 'PUBLISHED'], 200);
+        }
+
+        if ($request->method() === 'GET' && str_contains($request->url(), '/ig_123456789/media')) {
+            return Http::response([
+                'data' => [[
+                    'id' => 'media-already-published',
+                    'permalink' => 'https://www.instagram.com/p/ALREADY/',
+                ]],
+            ], 200);
+        }
+
+        return Http::response(['error' => ['message' => 'unexpected']], 500);
+    });
+
+    $result = $this->publisher->publish($this->postPlatform->fresh());
+
+    expect($result)->toBe([
+        'id' => 'media-already-published',
+        'url' => 'https://www.instagram.com/p/ALREADY/',
+    ]);
+
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), '/media_publish'));
+    Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+});
+
+test('instagram publisher still completes a published container when recent media cannot be loaded', function () {
+    $this->postPlatform->update([
+        'error_context' => [
+            'instagram_workflow' => [
+                'stage' => 'final_container',
+                'container_id' => 'container-123',
+            ],
+        ],
+    ]);
+
+    Http::fake(function (Request $request) {
+        if ($request->method() === 'GET' && str_contains($request->url(), '/container-123')) {
+            return Http::response(['status_code' => 'PUBLISHED'], 200);
+        }
+
+        if ($request->method() === 'GET' && str_contains($request->url(), '/ig_123456789/media')) {
+            return Http::response(['error' => ['message' => 'temporarily unavailable']], 500);
+        }
+
+        return Http::response(['error' => ['message' => 'unexpected']], 500);
+    });
+
+    expect($this->publisher->publish($this->postPlatform->fresh()))->toBe([
+        'id' => 'container-123',
+        'url' => null,
+    ]);
+
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), '/media_publish'));
 });
 
 test('instagram publisher retries a 5xx on container status without publishing', function () {

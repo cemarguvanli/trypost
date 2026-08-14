@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Social;
 
+use App\Enums\Instagram\ContainerStatus;
 use App\Enums\PostPlatform\ContentType;
 use App\Enums\SocialAccount\Platform;
 use App\Exceptions\PlatformUnavailableException;
@@ -274,10 +275,14 @@ class InstagramPublisher
 
     private function finishContainer(string $instagramId, string $accessToken, string $containerId): array
     {
-        $this->waitForMediaProcessing($containerId, $accessToken, [
+        $status = $this->waitForMediaProcessing($containerId, $accessToken, [
             'stage' => self::WORKFLOW_FINAL_CONTAINER,
             'container_id' => $containerId,
         ]);
+
+        if ($status === ContainerStatus::Published) {
+            return $this->alreadyPublishedContainer($instagramId, $accessToken, $containerId);
+        }
 
         return $this->publishContainer($instagramId, $accessToken, $containerId);
     }
@@ -331,7 +336,7 @@ class InstagramPublisher
     /**
      * @param  array<string, mixed>  $workflow
      */
-    private function waitForMediaProcessing(string $containerId, string $accessToken, array $workflow): void
+    private function waitForMediaProcessing(string $containerId, string $accessToken, array $workflow): ContainerStatus
     {
         $statusResponse = $this->socialHttp()->get("{$this->baseUrl}/{$containerId}", [
             'fields' => 'status_code',
@@ -346,20 +351,44 @@ class InstagramPublisher
             throw $this->pendingContainerException($containerId, $workflow, $statusResponse->status());
         }
 
-        $status = $statusResponse->json()['status_code'] ?? 'UNKNOWN';
+        $status = ContainerStatus::tryFrom((string) ($statusResponse->json()['status_code'] ?? ''));
 
-        if ($status === 'FINISHED') {
-            return;
-        }
-
-        if ($status === 'ERROR') {
-            throw new InstagramPublishException(
+        return match ($status) {
+            ContainerStatus::Finished, ContainerStatus::Published => $status,
+            ContainerStatus::Error => throw new InstagramPublishException(
                 userMessage: 'Instagram media processing failed',
                 category: ErrorCategory::ServerError,
-            );
-        }
+            ),
+            ContainerStatus::Expired => throw new InstagramPublishException(
+                userMessage: 'Media container expired. Please try again in a few minutes.',
+                category: ErrorCategory::ServerError,
+            ),
+            default => throw $this->pendingContainerException($containerId, $workflow),
+        };
+    }
 
-        throw $this->pendingContainerException($containerId, $workflow);
+    /**
+     * The container node has no published media id. After media_publish already
+     * succeeded, the newest item on GET /{IG_USER_ID}/media is the recovery path.
+     *
+     * @return array{id: string, url: string|null}
+     */
+    private function alreadyPublishedContainer(string $instagramId, string $accessToken, string $containerId): array
+    {
+        $response = $this->socialHttp()->get("{$this->baseUrl}/{$instagramId}/media", [
+            'fields' => 'id,permalink',
+            'limit' => 1,
+            'access_token' => $accessToken,
+        ]);
+
+        $media = $response->successful() ? data_get($response->json(), 'data.0') : null;
+        $mediaId = data_get($media, 'id');
+        $permalink = data_get($media, 'permalink');
+
+        return [
+            'id' => is_string($mediaId) && $mediaId !== '' ? $mediaId : $containerId,
+            'url' => is_string($permalink) ? $permalink : null,
+        ];
     }
 
     /**
