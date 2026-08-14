@@ -205,14 +205,15 @@ class TikTokPublisher
 
         $publishId = data_get($data, 'data.publish_id');
 
-        if (! $publishId) {
+        if (! is_string($publishId) || $publishId === '') {
             throw new TikTokPublishException(
                 userMessage: 'TikTok did not return a publish_id',
                 category: ErrorCategory::ServerError,
             );
         }
 
-        // Wait for processing and get final status
+        $this->rememberPublishId($postPlatform, $publishId);
+
         return $this->completePublish($postPlatform, $publishId);
     }
 
@@ -271,13 +272,14 @@ class TikTokPublisher
 
             $publishId = data_get($response->json(), 'data.publish_id');
 
-            if (! $publishId) {
+            if (! is_string($publishId) || $publishId === '') {
                 throw new TikTokPublishException(
                     userMessage: 'TikTok did not return a publish_id',
                     category: ErrorCategory::ServerError,
                 );
             }
 
+            $this->rememberPublishId($postPlatform, $publishId, $derivatives);
         } catch (Throwable $e) {
             app(TikTokPhotoDerivativeCleaner::class)->cleanupPaths($derivatives);
 
@@ -400,6 +402,28 @@ class TikTokPublisher
         throw $this->pendingPublishException($publishId);
     }
 
+    /**
+     * Persist the publish_id before status polling so a crash after /init/
+     * can resume without creating a second publish.
+     *
+     * @param  list<string>  $derivatives
+     */
+    private function rememberPublishId(PostPlatform $postPlatform, string $publishId, array $derivatives = []): void
+    {
+        $context = [
+            ...($postPlatform->error_context ?? []),
+            'tiktok_publish_id' => $publishId,
+        ];
+
+        if ($derivatives !== []) {
+            $context['tiktok_derivative_paths'] = $derivatives;
+        }
+
+        $postPlatform->update([
+            'error_context' => $context,
+        ]);
+    }
+
     private function pendingPublishException(string $publishId, ?int $httpStatus = null): PlatformUnavailableException
     {
         return new PlatformUnavailableException(
@@ -412,18 +436,29 @@ class TikTokPublisher
     }
 
     /**
+     * Finish an in-flight publish and prune hosted photos only when TikTok
+     * confirmed the attempt is dead, or when it completed. Resumable
+     * interruptions (still processing, expired token, unexpected crash)
+     * must keep the files so a later status poll can still PULL_FROM_URL.
+     *
      * @param  array<array-key, mixed>  $derivatives
      * @return array<string, mixed>
      */
     private function completePublishWithCleanup(PostPlatform $postPlatform, string $publishId, array $derivatives): array
     {
-        $retainDerivatives = false;
+        $retainDerivatives = true;
 
         try {
-            return $this->completePublish($postPlatform, $publishId);
+            $result = $this->completePublish($postPlatform, $publishId);
+            $retainDerivatives = false;
+
+            return $result;
         } catch (PlatformUnavailableException $e) {
-            $retainDerivatives = true;
             $e->context['tiktok_derivative_paths'] = $derivatives;
+
+            throw $e;
+        } catch (TikTokPublishException $e) {
+            $retainDerivatives = false;
 
             throw $e;
         } finally {

@@ -292,7 +292,10 @@ class PublishToSocialPlatform implements ShouldBeUnique, ShouldQueue
         $previousContext = $this->postPlatform->error_context ?? [];
 
         if ($this->postPlatform->platform === SocialPlatform::TikTok) {
-            app(TikTokPhotoDerivativeCleaner::class)->cleanup($previousContext, $this->postPlatform->id);
+            app(TikTokPhotoDerivativeCleaner::class)->cleanupUnlessPublishInFlight(
+                $previousContext,
+                $this->postPlatform->id,
+            );
         }
 
         $failureContext = [...$previousContext, ...($context ?? [])];

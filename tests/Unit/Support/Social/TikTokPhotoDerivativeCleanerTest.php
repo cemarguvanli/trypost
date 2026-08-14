@@ -31,6 +31,33 @@ test('it deletes only managed TikTok photo derivatives', function () {
     Storage::assertExists($unmanagedPaths);
 });
 
+test('it keeps derivatives while a publish_id is still in flight', function () {
+    Storage::fake();
+
+    $path = 'social-tiktok-photos/123e4567-e89b-12d3-a456-426614174000.jpg';
+    Storage::put($path, 'image');
+
+    app(TikTokPhotoDerivativeCleaner::class)->cleanupUnlessPublishInFlight([
+        'tiktok_publish_id' => 'pub_in_flight',
+        'tiktok_derivative_paths' => [$path],
+    ]);
+
+    Storage::assertExists($path);
+});
+
+test('it prunes derivatives when there is no publish_id to resume', function () {
+    Storage::fake();
+
+    $path = 'social-tiktok-photos/123e4567-e89b-12d3-a456-426614174000.jpg';
+    Storage::put($path, 'image');
+
+    app(TikTokPhotoDerivativeCleaner::class)->cleanupUnlessPublishInFlight([
+        'tiktok_derivative_paths' => [$path],
+    ]);
+
+    Storage::assertMissing($path);
+});
+
 test('it ignores invalid retry context', function () {
     Storage::fake();
 

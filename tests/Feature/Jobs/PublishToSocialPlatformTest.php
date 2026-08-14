@@ -21,6 +21,7 @@ use App\Models\PostPlatform;
 use App\Models\SocialAccount;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Services\Media\MediaOptimizer;
 use App\Services\Social\ConnectionVerifier;
 use App\Services\Social\LinkedInPagePublisher;
 use App\Services\Social\LinkedInPublisher;
@@ -822,7 +823,7 @@ test('failed hook skips platforms that are already published', function () {
         ->and($this->postPlatform->error_message)->toBeNull();
 });
 
-test('failed hook prunes pending TikTok photo derivatives', function () {
+test('failed hook keeps TikTok photo derivatives while a publish_id can be resumed', function () {
     Event::fake();
     Mail::fake();
     Storage::fake();
@@ -842,7 +843,7 @@ test('failed hook prunes pending TikTok photo derivatives', function () {
 
     (new PublishToSocialPlatform($this->postPlatform->fresh()))->failed(new TypeError('Simulated worker kill'));
 
-    Storage::assertMissing($path);
+    Storage::assertExists($path);
     Storage::assertExists($unrelatedPath);
     expect($this->postPlatform->fresh()->error_context)->toMatchArray([
         'tiktok_publish_id' => 'publish-123',
@@ -850,7 +851,28 @@ test('failed hook prunes pending TikTok photo derivatives', function () {
     ]);
 });
 
-test('terminal TikTok account guards prune derivatives from a resumable photo publish', function (string $guard) {
+test('failed hook prunes TikTok photo derivatives when there is no publish_id', function () {
+    Event::fake();
+    Mail::fake();
+    Storage::fake();
+
+    $path = 'social-tiktok-photos/123e4567-e89b-12d3-a456-426614174000.jpg';
+    Storage::put($path, 'image');
+    $this->postPlatform->update([
+        'platform' => Platform::TikTok,
+        'status' => PlatformStatus::Retrying,
+        'error_context' => [
+            'tiktok_derivative_paths' => [$path],
+        ],
+    ]);
+
+    (new PublishToSocialPlatform($this->postPlatform->fresh()))->failed(new TypeError('Simulated worker kill'));
+
+    Storage::assertMissing($path);
+    expect($this->postPlatform->fresh()->error_context['category'] ?? null)->toBe('job_failed');
+});
+
+test('terminal TikTok account guards keep derivatives while a publish_id can be resumed', function (string $guard) {
     Event::fake();
     Mail::fake();
     Storage::fake();
@@ -880,7 +902,7 @@ test('terminal TikTok account guards prune derivatives from a resumable photo pu
 
     (new PublishToSocialPlatform($platform))->handle();
 
-    Storage::assertMissing($path);
+    Storage::assertExists($path);
     $platform->refresh();
 
     expect($platform->status)->toBe(PlatformStatus::Failed)
@@ -907,6 +929,80 @@ test('terminal TikTok account guards prune derivatives from a resumable photo pu
     'expired token' => 'token_expired',
     'missing publish scopes' => 'missing_scopes',
 ]);
+
+test('tiktok photo publish resumes after a status-fetch token expiry without a second init', function () {
+    Event::fake();
+    Mail::fake();
+    Storage::fake();
+
+    $account = SocialAccount::factory()->tiktok()->create([
+        'workspace_id' => $this->workspace->id,
+        'username' => 'tiktoker',
+        'token_expires_at' => now()->addDay(),
+    ]);
+    $this->post->update([
+        'media' => [[
+            'id' => 'oversized',
+            'path' => 'media/2026-01/big.jpg',
+            'url' => 'https://example.com/media/2026-01/big.jpg',
+            'mime_type' => 'image/jpeg',
+            'original_filename' => 'big.jpg',
+            'meta' => ['width' => 1254, 'height' => 1254],
+        ]],
+    ]);
+    $platform = PostPlatform::factory()->tiktok()->create([
+        'post_id' => $this->post->id,
+        'social_account_id' => $account->id,
+        'status' => PlatformStatus::Pending,
+        'enabled' => true,
+        'meta' => ['privacy_level' => 'SELF_ONLY'],
+    ]);
+
+    $mockOptimizer = Mockery::mock(MediaOptimizer::class);
+    $mockOptimizer->shouldReceive('maxWidthForPlatform')->with(Platform::TikTok)->andReturn(1080);
+    $mockOptimizer->shouldReceive('optimizeImage')->with(Mockery::type('string'), Platform::TikTok)->andReturnUsing(function (string $tempFile) {
+        $optimized = tempnam(sys_get_temp_dir(), 'tt_opt_');
+        copy($tempFile, $optimized);
+
+        return $optimized;
+    });
+    app()->instance(MediaOptimizer::class, $mockOptimizer);
+
+    $verifier = Mockery::mock(ConnectionVerifier::class);
+    $verifier->shouldReceive('verify')->once()->andReturn(true);
+    $this->app->instance(ConnectionVerifier::class, $verifier);
+
+    $api = config('trypost.platforms.tiktok.api');
+
+    Http::fake([
+        $api.'/post/publish/content/init/' => Http::response(['data' => ['publish_id' => 'pub_job_401']]),
+        $api.'/post/publish/status/fetch/' => Http::sequence()
+            ->push([
+                'error' => [
+                    'code' => 'access_token_invalid',
+                    'message' => 'Access token is invalid',
+                ],
+            ], 401)
+            ->push([
+                'data' => [
+                    'status' => 'PUBLISH_COMPLETE',
+                    'publicaly_available_post_id' => ['video_123'],
+                ],
+            ]),
+        '*' => Http::response('fake-image-content', 200),
+    ]);
+
+    (new PublishToSocialPlatform($platform))->handle();
+
+    $platform->refresh();
+
+    expect($platform->status)->toBe(PlatformStatus::Published)
+        ->and($platform->platform_post_id)->toBe('video_123')
+        ->and($platform->error_context)->toBeNull()
+        ->and(Storage::allFiles('social-tiktok-photos'))->toBeEmpty()
+        ->and(Http::recorded(fn ($request) => str_contains($request->url(), '/post/publish/content/init/')))
+        ->toHaveCount(1);
+});
 
 test('pinterest media status 401 marks the account token expired and notifies to reconnect', function () {
     Event::fake();

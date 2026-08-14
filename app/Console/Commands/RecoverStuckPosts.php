@@ -39,7 +39,7 @@ class RecoverStuckPosts extends Command
                     ->get();
 
                 $stalePlatforms->each(function (PostPlatform $postPlatform): void {
-                    $this->tiktokPhotoDerivativeCleaner->cleanup(
+                    $this->tiktokPhotoDerivativeCleaner->cleanupUnlessPublishInFlight(
                         $postPlatform->error_context,
                         $postPlatform->id,
                     );

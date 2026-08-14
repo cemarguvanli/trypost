@@ -28,6 +28,22 @@ class TikTokPhotoDerivativeCleaner
     }
 
     /**
+     * Keep hosted photos while a publish_id can still be resumed.
+     *
+     * @param  array<string, mixed>|null  $context
+     */
+    public function cleanupUnlessPublishInFlight(?array $context, ?string $postPlatformId = null): void
+    {
+        $publishId = data_get($context, 'tiktok_publish_id');
+
+        if (is_string($publishId) && $publishId !== '') {
+            return;
+        }
+
+        $this->cleanup($context, $postPlatformId);
+    }
+
+    /**
      * @param  array<array-key, mixed>  $paths
      */
     public function cleanupPaths(array $paths, ?string $postPlatformId = null): void

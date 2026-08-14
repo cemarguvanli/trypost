@@ -140,7 +140,7 @@ test('it recovers platforms stuck in retrying for over 1 hour', function () {
         ->and($post->status)->toBe(PostStatus::Failed);
 });
 
-test('it prunes TikTok photo derivatives when recovering a stuck retry', function () {
+test('it keeps TikTok photo derivatives when recovering a stuck in-flight publish', function () {
     Storage::fake();
     $path = 'social-tiktok-photos/123e4567-e89b-12d3-a456-426614174000.jpg';
     Storage::put($path, 'image');
@@ -168,11 +168,42 @@ test('it prunes TikTok photo derivatives when recovering a stuck retry', functio
 
     $this->artisan('social:recover-stuck-posts')->assertSuccessful();
 
-    Storage::assertMissing($path);
+    Storage::assertExists($path);
     expect($platform->fresh()->error_context)->toMatchArray([
         'tiktok_publish_id' => 'publish-stuck',
         'category' => 'timeout',
     ]);
+});
+
+test('it prunes TikTok photo derivatives when recovering a stuck retry with no publish_id', function () {
+    Storage::fake();
+    $path = 'social-tiktok-photos/123e4567-e89b-12d3-a456-426614174000.jpg';
+    Storage::put($path, 'image');
+
+    $post = Post::factory()->create([
+        'workspace_id' => $this->workspace->id,
+        'user_id' => $this->user->id,
+        'status' => PostStatus::Publishing,
+        'updated_at' => now()->subHours(2),
+    ]);
+    $account = SocialAccount::factory()->tiktok()->create([
+        'workspace_id' => $this->workspace->id,
+    ]);
+    $platform = PostPlatform::factory()->tiktok()->create([
+        'post_id' => $post->id,
+        'social_account_id' => $account->id,
+        'status' => PlatformStatus::Retrying,
+        'enabled' => true,
+        'error_context' => [
+            'tiktok_derivative_paths' => [$path],
+        ],
+        'updated_at' => now()->subHours(2),
+    ]);
+
+    $this->artisan('social:recover-stuck-posts')->assertSuccessful();
+
+    Storage::assertMissing($path);
+    expect($platform->fresh()->error_context['category'] ?? null)->toBe('timeout');
 });
 
 test('it preserves an Instagram workflow when recovering a stuck retry', function () {
