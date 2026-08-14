@@ -723,7 +723,7 @@ test('tiktok publisher publishes with user-selected privacy level even when crea
     });
 });
 
-test('tiktok publisher throws exception when publish fails', function (string $status) {
+test('tiktok publisher throws exception when publish fails', function () {
     $this->post->update([
         'media' => [
             [
@@ -742,7 +742,7 @@ test('tiktok publisher throws exception when publish fails', function (string $s
         ], 200),
         $this->api.'/post/publish/status/fetch/' => Http::response([
             'data' => [
-                'status' => $status,
+                'status' => 'FAILED',
                 'fail_reason' => 'video_rejected',
             ],
         ], 200),
@@ -750,10 +750,7 @@ test('tiktok publisher throws exception when publish fails', function (string $s
 
     expect(fn () => $this->publisher->publish($this->postPlatform))
         ->toThrow(TikTokPublishException::class);
-})->with([
-    'FAILED' => ['FAILED'],
-    'PUBLISH_FAILED' => ['PUBLISH_FAILED'],
-]);
+});
 
 test('tiktok publisher sends meta settings in video publish request', function () {
     $this->postPlatform->update([

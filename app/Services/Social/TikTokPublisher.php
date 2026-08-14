@@ -6,6 +6,7 @@ namespace App\Services\Social;
 
 use App\DataTransferObjects\MediaItem;
 use App\Enums\SocialAccount\Platform;
+use App\Enums\TikTok\PublishStatus;
 use App\Exceptions\PlatformUnavailableException;
 use App\Exceptions\Social\ErrorCategory;
 use App\Exceptions\Social\TikTokPublishException;
@@ -388,18 +389,16 @@ class TikTokPublisher
         }
 
         $data = $response->json();
-        $status = data_get($data, 'data.status', 'UNKNOWN');
+        $status = PublishStatus::tryFrom((string) data_get($data, 'data.status', ''));
 
-        if ($status === 'PUBLISH_COMPLETE') {
-            return data_get($data, 'data', []);
-        }
-
-        if (in_array($status, ['FAILED', 'PUBLISH_FAILED'], true)) {
-            $failReason = data_get($data, 'data.fail_reason', 'Unknown error');
-            throw TikTokPublishException::fromFailReason($failReason, json_encode($data));
-        }
-
-        throw $this->pendingPublishException($publishId);
+        return match ($status) {
+            PublishStatus::PublishComplete => data_get($data, 'data', []),
+            PublishStatus::Failed => throw TikTokPublishException::fromFailReason(
+                (string) data_get($data, 'data.fail_reason', 'Unknown error'),
+                json_encode($data),
+            ),
+            default => throw $this->pendingPublishException($publishId),
+        };
     }
 
     /**
