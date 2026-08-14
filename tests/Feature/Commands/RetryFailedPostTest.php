@@ -637,6 +637,78 @@ test('an Instagram retry after a container ERROR starts a new container', functi
     Http::assertNotSent(fn ($request) => str_contains($request->url(), 'container-dead'));
 });
 
+test('an Instagram retry after a container EXPIRED starts a new container', function () {
+    $this->post->update([
+        'media' => [[
+            'id' => 'test-media-id',
+            'path' => 'media/2026-01/test-image.jpg',
+            'url' => 'https://example.com/media/2026-01/test-image.jpg',
+            'mime_type' => 'image/jpeg',
+            'original_filename' => 'test.jpg',
+        ]],
+    ]);
+
+    $failedInstagram = PostPlatform::factory()->instagram()->failed()->create([
+        'post_id' => $this->post->id,
+        'social_account_id' => SocialAccount::factory()->instagram()->create([
+            'workspace_id' => $this->workspace->id,
+            'platform_user_id' => 'ig_123456789',
+            'token_expires_at' => now()->addDays(60),
+        ]),
+        'content_type' => ContentType::InstagramFeed,
+        'error_context' => [
+            'instagram_workflow' => [
+                'stage' => 'final_container',
+                'container_id' => 'container-expired',
+            ],
+            'category' => 'platform_unavailable',
+        ],
+    ]);
+
+    Mail::fake();
+    Queue::fake();
+
+    $this->artisan('posts:retry', ['post' => $this->post->id])
+        ->expectsConfirmation('Queue publish attempts for these failed platforms?', 'yes')
+        ->expectsOutputToContain('Resume')
+        ->assertSuccessful();
+
+    Http::fake([
+        'https://graph.instagram.com/v25.0/container-expired*' => Http::response(['status_code' => 'EXPIRED'], 200),
+    ]);
+
+    (new PublishToSocialPlatform($failedInstagram->fresh()))->handle();
+
+    expect($failedInstagram->fresh()->status)->toBe(PlatformStatus::Failed)
+        ->and($failedInstagram->fresh()->error_context['category'] ?? null)->toBe('server_error');
+
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), '/media_publish'));
+
+    $this->artisan('posts:retry', ['post' => $this->post->id])
+        ->expectsConfirmation('Queue publish attempts for these failed platforms?', 'yes')
+        ->expectsOutputToContain('New')
+        ->assertSuccessful();
+
+    expect($failedInstagram->fresh()->error_context)->toBeNull();
+
+    Http::fake([
+        'https://graph.instagram.com/v25.0/ig_123456789/media' => Http::response(['id' => 'container-fresh'], 200),
+        'https://graph.instagram.com/v25.0/container-fresh*' => Http::response(['status_code' => 'FINISHED'], 200),
+        'https://graph.instagram.com/v25.0/ig_123456789/media_publish' => Http::response(['id' => 'media-789'], 200),
+        'https://graph.instagram.com/v25.0/media-789*' => Http::response([
+            'permalink' => 'https://www.instagram.com/p/GHI789/',
+        ], 200),
+    ]);
+
+    (new PublishToSocialPlatform($failedInstagram->fresh()))->handle();
+
+    expect($failedInstagram->fresh()->status)->toBe(PlatformStatus::Published)
+        ->and($failedInstagram->fresh()->platform_post_id)->toBe('media-789');
+
+    Http::assertSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/ig_123456789/media'));
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), 'container-expired'));
+});
+
 test('an Instagram resume of a published container completes without media_publish', function () {
     $failedInstagram = PostPlatform::factory()->instagram()->failed()->create([
         'post_id' => $this->post->id,
