@@ -743,8 +743,8 @@ test('an Instagram resume of a published container completes without media_publi
         if ($request->method() === 'GET' && str_contains($request->url(), '/ig_123456789/media')) {
             return Http::response([
                 'data' => [[
-                    'id' => 'media-already-published',
-                    'permalink' => 'https://www.instagram.com/p/ALREADY/',
+                    'id' => 'other-account-post',
+                    'permalink' => 'https://www.instagram.com/p/WRONG/',
                 ]],
             ], 200);
         }
@@ -755,9 +755,58 @@ test('an Instagram resume of a published container completes without media_publi
     (new PublishToSocialPlatform($failedInstagram->fresh()))->handle();
 
     expect($failedInstagram->fresh()->status)->toBe(PlatformStatus::Published)
-        ->and($failedInstagram->fresh()->platform_post_id)->toBe('media-already-published')
-        ->and($failedInstagram->fresh()->platform_url)->toBe('https://www.instagram.com/p/ALREADY/');
+        ->and($failedInstagram->fresh()->platform_post_id)->toBe('container-123')
+        ->and($failedInstagram->fresh()->platform_url)->toBeNull();
 
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), '/ig_123456789/media'));
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), '/media_publish'));
+    Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+});
+
+test('an Instagram resume of a checkpointed media id completes without media_publish', function () {
+    $failedInstagram = PostPlatform::factory()->instagram()->failed()->create([
+        'post_id' => $this->post->id,
+        'social_account_id' => SocialAccount::factory()->instagram()->create([
+            'workspace_id' => $this->workspace->id,
+            'platform_user_id' => 'ig_123456789',
+            'token_expires_at' => now()->addDays(60),
+        ]),
+        'content_type' => ContentType::InstagramFeed,
+        'error_context' => [
+            'instagram_workflow' => [
+                'stage' => 'final_container',
+                'container_id' => 'container-123',
+                'media_id' => 'media-persisted',
+            ],
+            'category' => 'job_failed',
+        ],
+    ]);
+
+    Mail::fake();
+    Queue::fake();
+
+    $this->artisan('posts:retry', ['post' => $this->post->id])
+        ->expectsConfirmation('Queue publish attempts for these failed platforms?', 'yes')
+        ->expectsOutputToContain('Resume')
+        ->assertSuccessful();
+
+    Http::fake(function (Request $request) {
+        if ($request->method() === 'GET' && str_contains($request->url(), '/media-persisted')) {
+            return Http::response([
+                'permalink' => 'https://www.instagram.com/p/PERSISTED/',
+            ], 200);
+        }
+
+        return Http::response(['error' => ['message' => 'unexpected']], 500);
+    });
+
+    (new PublishToSocialPlatform($failedInstagram->fresh()))->handle();
+
+    expect($failedInstagram->fresh()->status)->toBe(PlatformStatus::Published)
+        ->and($failedInstagram->fresh()->platform_post_id)->toBe('media-persisted')
+        ->and($failedInstagram->fresh()->platform_url)->toBe('https://www.instagram.com/p/PERSISTED/');
+
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), '/container-123'));
     Http::assertNotSent(fn ($request) => str_contains($request->url(), '/media_publish'));
     Http::assertNotSent(fn ($request) => $request->method() === 'POST');
 });

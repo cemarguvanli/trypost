@@ -891,43 +891,10 @@ test('instagram publisher completes a published container without calling media_
         if ($request->method() === 'GET' && str_contains($request->url(), '/ig_123456789/media')) {
             return Http::response([
                 'data' => [[
-                    'id' => 'media-already-published',
-                    'permalink' => 'https://www.instagram.com/p/ALREADY/',
+                    'id' => 'other-account-post',
+                    'permalink' => 'https://www.instagram.com/p/WRONG/',
                 ]],
             ], 200);
-        }
-
-        return Http::response(['error' => ['message' => 'unexpected']], 500);
-    });
-
-    $result = $this->publisher->publish($this->postPlatform->fresh());
-
-    expect($result)->toBe([
-        'id' => 'media-already-published',
-        'url' => 'https://www.instagram.com/p/ALREADY/',
-    ]);
-
-    Http::assertNotSent(fn ($request) => str_contains($request->url(), '/media_publish'));
-    Http::assertNotSent(fn ($request) => $request->method() === 'POST');
-});
-
-test('instagram publisher still completes a published container when recent media cannot be loaded', function () {
-    $this->postPlatform->update([
-        'error_context' => [
-            'instagram_workflow' => [
-                'stage' => 'final_container',
-                'container_id' => 'container-123',
-            ],
-        ],
-    ]);
-
-    Http::fake(function (Request $request) {
-        if ($request->method() === 'GET' && str_contains($request->url(), '/container-123')) {
-            return Http::response(['status_code' => 'PUBLISHED'], 200);
-        }
-
-        if ($request->method() === 'GET' && str_contains($request->url(), '/ig_123456789/media')) {
-            return Http::response(['error' => ['message' => 'temporarily unavailable']], 500);
         }
 
         return Http::response(['error' => ['message' => 'unexpected']], 500);
@@ -938,10 +905,12 @@ test('instagram publisher still completes a published container when recent medi
         'url' => null,
     ]);
 
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), '/ig_123456789/media'));
     Http::assertNotSent(fn ($request) => str_contains($request->url(), '/media_publish'));
+    Http::assertNotSent(fn ($request) => $request->method() === 'POST');
 });
 
-test('instagram publisher recovers a published story from /stories not /media', function () {
+test('instagram publisher does not bind another account post when a published story has no media id', function () {
     $this->postPlatform->update([
         'content_type' => ContentType::InstagramStory,
         'error_context' => [
@@ -960,7 +929,7 @@ test('instagram publisher recovers a published story from /stories not /media', 
         if ($request->method() === 'GET' && str_contains($request->url(), '/ig_123456789/stories')) {
             return Http::response([
                 'data' => [[
-                    'id' => 'story-already-published',
+                    'id' => 'other-story',
                     'permalink' => 'https://www.instagram.com/stories/testuser/1/',
                 ]],
             ], 200);
@@ -979,16 +948,16 @@ test('instagram publisher recovers a published story from /stories not /media', 
     });
 
     expect($this->publisher->publish($this->postPlatform->fresh()))->toBe([
-        'id' => 'story-already-published',
-        'url' => 'https://www.instagram.com/stories/testuser/1/',
+        'id' => 'container-123',
+        'url' => null,
     ]);
 
-    Http::assertSent(fn (Request $request) => $request->method() === 'GET' && str_contains($request->url(), '/ig_123456789/stories'));
+    Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/ig_123456789/stories'));
     Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/ig_123456789/media'));
     Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/media_publish'));
 });
 
-test('instagram publisher recovers a published reel from /media not /stories', function () {
+test('instagram publisher does not bind another reel from /media when published without a media id', function () {
     $this->postPlatform->update([
         'content_type' => ContentType::InstagramReel,
         'error_context' => [
@@ -1007,8 +976,8 @@ test('instagram publisher recovers a published reel from /media not /stories', f
         if ($request->method() === 'GET' && str_contains($request->url(), '/ig_123456789/media')) {
             return Http::response([
                 'data' => [[
-                    'id' => 'reel-already-published',
-                    'permalink' => 'https://www.instagram.com/reel/ALREADY/',
+                    'id' => 'other-reel',
+                    'permalink' => 'https://www.instagram.com/reel/WRONG/',
                 ]],
             ], 200);
         }
@@ -1017,16 +986,16 @@ test('instagram publisher recovers a published reel from /media not /stories', f
     });
 
     expect($this->publisher->publish($this->postPlatform->fresh()))->toBe([
-        'id' => 'reel-already-published',
-        'url' => 'https://www.instagram.com/reel/ALREADY/',
+        'id' => 'container-123',
+        'url' => null,
     ]);
 
-    Http::assertSent(fn (Request $request) => $request->method() === 'GET' && str_contains($request->url(), '/ig_123456789/media'));
+    Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/ig_123456789/media'));
     Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/ig_123456789/stories'));
     Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/media_publish'));
 });
 
-test('instagram publisher recovers a published carousel parent from /media without media_publish', function () {
+test('instagram publisher keeps a published carousel parent id without listing /media', function () {
     $this->postPlatform->update([
         'error_context' => [
             'instagram_workflow' => [
@@ -1053,8 +1022,8 @@ test('instagram publisher recovers a published carousel parent from /media witho
         if ($request->method() === 'GET' && str_contains($request->url(), '/ig_123456789/media')) {
             return Http::response([
                 'data' => [[
-                    'id' => 'carousel-already-published',
-                    'permalink' => 'https://www.instagram.com/p/CAROUSEL/',
+                    'id' => 'other-carousel',
+                    'permalink' => 'https://www.instagram.com/p/WRONG/',
                 ]],
             ], 200);
         }
@@ -1063,45 +1032,38 @@ test('instagram publisher recovers a published carousel parent from /media witho
     });
 
     expect($this->publisher->publish($this->postPlatform->fresh()))->toBe([
-        'id' => 'carousel-already-published',
-        'url' => 'https://www.instagram.com/p/CAROUSEL/',
+        'id' => 'carousel-parent-123',
+        'url' => null,
     ]);
 
     Http::assertSent(fn (Request $request) => $request->method() === 'POST' && str_contains($request->url(), '/ig_123456789/media'));
+    Http::assertNotSent(fn (Request $request) => $request->method() === 'GET' && str_contains($request->url(), '/ig_123456789/media'));
     Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/media_publish'));
 });
 
-test('instagram publisher falls back to the container id when a published story cannot be listed', function () {
+test('instagram publisher resumes a checkpointed media id without listing recent media', function () {
     $this->postPlatform->update([
-        'content_type' => ContentType::InstagramStory,
         'error_context' => [
             'instagram_workflow' => [
                 'stage' => 'final_container',
                 'container_id' => 'container-123',
+                'media_id' => 'media-persisted',
             ],
         ],
     ]);
 
     Http::fake(function (Request $request) {
-        if ($request->method() === 'GET' && str_contains($request->url(), '/container-123')) {
-            return Http::response(['status_code' => 'PUBLISHED'], 200);
-        }
-
-        if ($request->method() === 'GET' && str_contains($request->url(), '/ig_123456789/stories')) {
+        if ($request->method() === 'GET' && str_contains($request->url(), '/media-persisted')) {
             return Http::response([
-                'error' => [
-                    'message' => 'Application does not have permission for this action',
-                    'type' => 'OAuthException',
-                    'code' => 10,
-                ],
-            ], 403);
+                'permalink' => 'https://www.instagram.com/p/PERSISTED/',
+            ], 200);
         }
 
         if ($request->method() === 'GET' && str_contains($request->url(), '/ig_123456789/media')) {
             return Http::response([
                 'data' => [[
-                    'id' => 'feed-must-not-be-used',
-                    'permalink' => 'https://www.instagram.com/p/FEED/',
+                    'id' => 'other-account-post',
+                    'permalink' => 'https://www.instagram.com/p/WRONG/',
                 ]],
             ], 200);
         }
@@ -1110,13 +1072,43 @@ test('instagram publisher falls back to the container id when a published story 
     });
 
     expect($this->publisher->publish($this->postPlatform->fresh()))->toBe([
-        'id' => 'container-123',
+        'id' => 'media-persisted',
+        'url' => 'https://www.instagram.com/p/PERSISTED/',
+    ]);
+
+    Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/container-123'));
+    Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/ig_123456789/media'));
+    Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/media_publish'));
+});
+
+test('instagram publisher checkpoints the media id before fetching the permalink', function () {
+    $this->post->update([
+        'media' => [[
+            'id' => 'test-media-id',
+            'path' => 'media/2026-01/test-image.jpg',
+            'url' => 'https://example.com/media/2026-01/test-image.jpg',
+            'mime_type' => 'image/jpeg',
+            'original_filename' => 'test.jpg',
+        ]],
+    ]);
+
+    Http::fake([
+        'https://graph.instagram.com/v25.0/ig_123456789/media' => Http::response(['id' => 'container-123'], 200),
+        'https://graph.instagram.com/v25.0/container-123*' => Http::response(['status_code' => 'FINISHED'], 200),
+        'https://graph.instagram.com/v25.0/ig_123456789/media_publish' => Http::response(['id' => 'media-123456789'], 200),
+        'https://graph.instagram.com/v25.0/media-123456789*' => Http::response(['error' => ['message' => 'temporarily unavailable']], 500),
+    ]);
+
+    expect($this->publisher->publish($this->postPlatform))->toBe([
+        'id' => 'media-123456789',
         'url' => null,
     ]);
 
-    Http::assertSent(fn (Request $request) => str_contains($request->url(), '/ig_123456789/stories'));
-    Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/ig_123456789/media'));
-    Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/media_publish'));
+    expect($this->postPlatform->fresh()->error_context['instagram_workflow'] ?? null)->toBe([
+        'stage' => 'final_container',
+        'container_id' => 'container-123',
+        'media_id' => 'media-123456789',
+    ]);
 });
 
 test('instagram facebook publisher recovers a published container on graph.facebook.com', function () {
@@ -1152,8 +1144,8 @@ test('instagram facebook publisher recovers a published container on graph.faceb
         if ($request->method() === 'GET' && str_contains($request->url(), '/ig_fb_123/media')) {
             return Http::response([
                 'data' => [[
-                    'id' => 'media-facebook-published',
-                    'permalink' => 'https://www.instagram.com/p/FACEBOOK/',
+                    'id' => 'other-facebook-post',
+                    'permalink' => 'https://www.instagram.com/p/WRONG/',
                 ]],
             ], 200);
         }
@@ -1162,11 +1154,12 @@ test('instagram facebook publisher recovers a published container on graph.faceb
     });
 
     expect($this->publisher->publish($this->postPlatform->fresh()))->toBe([
-        'id' => 'media-facebook-published',
-        'url' => 'https://www.instagram.com/p/FACEBOOK/',
+        'id' => 'container-123',
+        'url' => null,
     ]);
 
     Http::assertNotSent(fn (Request $request) => str_contains($request->url(), 'graph.instagram.com'));
+    Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/ig_fb_123/media'));
     Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/media_publish'));
 });
 

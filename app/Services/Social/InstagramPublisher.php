@@ -25,6 +25,8 @@ class InstagramPublisher
 
     private string $baseUrl;
 
+    private PostPlatform $postPlatform;
+
     private const int STATUS_RETRY_DELAY_SECONDS = 10;
 
     private const int STATUS_MAX_RETRIES = 90;
@@ -35,6 +37,7 @@ class InstagramPublisher
 
     public function publish(PostPlatform $postPlatform): array
     {
+        $this->postPlatform = $postPlatform;
         $this->validateContentLength($postPlatform);
 
         $account = $postPlatform->socialAccount;
@@ -52,7 +55,7 @@ class InstagramPublisher
         $pendingWorkflow = data_get($postPlatform->error_context, 'instagram_workflow');
 
         if (is_array($pendingWorkflow)) {
-            return $this->resumeWorkflow($instagramId, $accessToken, $content, $pendingWorkflow, $postPlatform->content_type);
+            return $this->resumeWorkflow($instagramId, $accessToken, $content, $pendingWorkflow);
         }
 
         $media = $postPlatform->post->mediaItems;
@@ -113,7 +116,7 @@ class InstagramPublisher
 
         $containerId = $this->createContainer($instagramId, $params, 'container');
 
-        return $this->finishContainer($instagramId, $accessToken, $containerId, ContentType::InstagramFeed);
+        return $this->finishContainer($instagramId, $accessToken, $containerId);
     }
 
     private function publishReel(string $instagramId, string $accessToken, ?string $content, $media): array
@@ -125,7 +128,7 @@ class InstagramPublisher
             'access_token' => $accessToken,
         ], 'reel container');
 
-        return $this->finishContainer($instagramId, $accessToken, $containerId, ContentType::InstagramReel);
+        return $this->finishContainer($instagramId, $accessToken, $containerId);
     }
 
     private function publishStory(string $instagramId, string $accessToken, $media): array
@@ -146,7 +149,7 @@ class InstagramPublisher
 
         $containerId = $this->createContainer($instagramId, $params, 'story container');
 
-        return $this->finishContainer($instagramId, $accessToken, $containerId, ContentType::InstagramStory);
+        return $this->finishContainer($instagramId, $accessToken, $containerId);
     }
 
     private function publishCarousel(string $instagramId, string $accessToken, ?string $content, $mediaCollection, ?string $aspectRatio): array
@@ -208,14 +211,14 @@ class InstagramPublisher
             );
         }
 
-        return $this->finishCarousel($instagramId, $accessToken, $content, $childContainers, $processingChildContainers, ContentType::InstagramFeed);
+        return $this->finishCarousel($instagramId, $accessToken, $content, $childContainers, $processingChildContainers);
     }
 
     /**
      * @param  list<string>  $childContainers
      * @param  list<string>  $processingChildContainers
      */
-    private function finishCarousel(string $instagramId, string $accessToken, ?string $content, array $childContainers, array $processingChildContainers, ?ContentType $contentType): array
+    private function finishCarousel(string $instagramId, string $accessToken, ?string $content, array $childContainers, array $processingChildContainers): array
     {
         $workflow = [
             'stage' => self::WORKFLOW_CAROUSEL_CHILDREN,
@@ -234,21 +237,27 @@ class InstagramPublisher
             'access_token' => $accessToken,
         ], 'carousel container');
 
-        return $this->finishContainer($instagramId, $accessToken, $carouselId, $contentType);
+        return $this->finishContainer($instagramId, $accessToken, $carouselId);
     }
 
     /**
      * @param  array<string, mixed>  $workflow
      */
-    private function resumeWorkflow(string $instagramId, string $accessToken, ?string $content, array $workflow, ?ContentType $contentType): array
+    private function resumeWorkflow(string $instagramId, string $accessToken, ?string $content, array $workflow): array
     {
+        $mediaId = data_get($workflow, 'media_id');
+
+        if (is_string($mediaId) && $mediaId !== '') {
+            return $this->publishedMedia($mediaId, $accessToken);
+        }
+
         $stage = data_get($workflow, 'stage');
 
         if ($stage === self::WORKFLOW_FINAL_CONTAINER) {
             $containerId = data_get($workflow, 'container_id');
 
             if (is_string($containerId) && $containerId !== '') {
-                return $this->finishContainer($instagramId, $accessToken, $containerId, $contentType);
+                return $this->finishContainer($instagramId, $accessToken, $containerId);
             }
         }
 
@@ -263,7 +272,6 @@ class InstagramPublisher
                     $content,
                     $children,
                     $processingChildren,
-                    $contentType,
                 );
             }
         }
@@ -274,7 +282,7 @@ class InstagramPublisher
         );
     }
 
-    private function finishContainer(string $instagramId, string $accessToken, string $containerId, ?ContentType $contentType): array
+    private function finishContainer(string $instagramId, string $accessToken, string $containerId): array
     {
         $status = $this->waitForMediaProcessing($containerId, $accessToken, [
             'stage' => self::WORKFLOW_FINAL_CONTAINER,
@@ -282,7 +290,7 @@ class InstagramPublisher
         ]);
 
         if ($status === ContainerStatus::Published) {
-            return $this->alreadyPublishedContainer($instagramId, $accessToken, $containerId, $contentType);
+            return $this->alreadyPublishedContainer($containerId);
         }
 
         return $this->publishContainer($instagramId, $accessToken, $containerId);
@@ -305,25 +313,16 @@ class InstagramPublisher
 
         $mediaId = $publishResponse->json()['id'] ?? null;
 
-        if (! $mediaId) {
+        if (! is_string($mediaId) || $mediaId === '') {
             throw new InstagramPublishException(
                 userMessage: 'Instagram publish failed: no media ID returned',
                 category: ErrorCategory::ServerError,
             );
         }
 
-        // Get permalink
-        $permalinkResponse = $this->socialHttp()->get("{$this->baseUrl}/{$mediaId}", [
-            'fields' => 'permalink',
-            'access_token' => $accessToken,
-        ]);
+        $this->rememberPublishedMedia($containerId, $mediaId);
 
-        $permalink = $permalinkResponse->json()['permalink'] ?? null;
-
-        return [
-            'id' => $mediaId,
-            'url' => $permalink,
-        ];
+        return $this->publishedMedia($mediaId, $accessToken);
     }
 
     protected function cropFailureException(string $message): SocialPublishException
@@ -369,29 +368,53 @@ class InstagramPublisher
     }
 
     /**
-     * The container node has no published media id. After media_publish already
-     * succeeded, recover from the matching IG User edge: /stories for stories
-     * (stories are not on /media), otherwise /media.
-     *
+     * Persist the media id before the permalink fetch so a crash after
+     * media_publish can resume with the real id instead of guessing from /media.
+     */
+    private function rememberPublishedMedia(string $containerId, string $mediaId): void
+    {
+        $this->postPlatform->update([
+            'error_context' => [
+                ...($this->postPlatform->error_context ?? []),
+                'instagram_workflow' => [
+                    'stage' => self::WORKFLOW_FINAL_CONTAINER,
+                    'container_id' => $containerId,
+                    'media_id' => $mediaId,
+                ],
+            ],
+        ]);
+    }
+
+    /**
      * @return array{id: string, url: string|null}
      */
-    private function alreadyPublishedContainer(string $instagramId, string $accessToken, string $containerId, ?ContentType $contentType): array
+    private function publishedMedia(string $mediaId, string $accessToken): array
     {
-        $edge = $contentType === ContentType::InstagramStory ? 'stories' : 'media';
-
-        $response = $this->socialHttp()->get("{$this->baseUrl}/{$instagramId}/{$edge}", [
-            'fields' => 'id,permalink',
-            'limit' => 1,
+        $permalinkResponse = $this->socialHttp()->get("{$this->baseUrl}/{$mediaId}", [
+            'fields' => 'permalink',
             'access_token' => $accessToken,
         ]);
 
-        $media = $response->successful() ? data_get($response->json(), 'data.0') : null;
-        $mediaId = data_get($media, 'id');
-        $permalink = data_get($media, 'permalink');
+        $permalink = data_get($permalinkResponse->json(), 'permalink');
 
         return [
-            'id' => is_string($mediaId) && $mediaId !== '' ? $mediaId : $containerId,
+            'id' => $mediaId,
             'url' => is_string($permalink) ? $permalink : null,
+        ];
+    }
+
+    /**
+     * The container node has no published media id. Listing /media or /stories
+     * and taking data.0 can bind a different post from the same account, so
+     * keep the container id until media_publish has checkpointed a media_id.
+     *
+     * @return array{id: string, url: string|null}
+     */
+    private function alreadyPublishedContainer(string $containerId): array
+    {
+        return [
+            'id' => $containerId,
+            'url' => null,
         ];
     }
 
