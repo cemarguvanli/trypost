@@ -31,7 +31,10 @@ class FacebookController extends SocialController
         'pages_show_list',
         'pages_read_engagement',
         'pages_manage_posts',
-        'read_insights',
+        // 'read_insights' removed: requires Meta App Review (Advanced Access,
+        // screencast submission) even for admin/tester accounts in dev mode.
+        // Without it the whole OAuth request is rejected ("Invalid Scopes").
+        // Page insights/analytics display is disabled; posting is unaffected.
     ];
 
     public function connect(Request $request): Response
